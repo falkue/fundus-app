@@ -1,0 +1,9 @@
+[Unit]
+Description=Fundus clean-up analysis nightly at 04:10 (after the import at 03:15)
+
+[Timer]
+OnCalendar=*-*-* 04:10:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target

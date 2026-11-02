@@ -1,0 +1,11 @@
+[Unit]
+Description=Fundus – nightly re-import of all project sources (idempotent)
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/Projects/Software/Fundus
+ExecStart=%h/Projects/Software/Fundus/.venv/bin/python -m fundus.cli import all
+# slides/charts that did not pass render.sh (deck copies, edits): re-scan the project folders (idempotent)
+ExecStartPost=-%h/Projects/Software/Fundus/.venv/bin/python -m fundus.cli exhibits sync
+# name variants of new organisations/people via local gemma4 (resumable, cached, never a third model)
+ExecStartPost=-%h/Projects/Software/Fundus/.venv/bin/python -m fundus.cli entities build

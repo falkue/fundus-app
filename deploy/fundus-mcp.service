@@ -1,0 +1,14 @@
+[Unit]
+Description=Fundus MCP server (evidence archive, streamable-http, Tailnet only 127.0.0.1:8010)
+After=network-online.target tailscaled.service
+Wants=network-online.target
+
+[Service]
+WorkingDirectory=%h/Projects/Software/Fundus
+ExecStart=%h/Projects/Software/Fundus/.venv/bin/python -m fundus.mcp_server --host 127.0.0.1 --port 8010
+# The Tailscale IP may not exist right after boot -> retry
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=default.target

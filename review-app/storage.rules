@@ -1,0 +1,26 @@
+rules_version = '2';
+// Slide images of a published review live under r/<random secret>/ – readable by whoever has the URL (the review app gets
+// it from the slide documents, which only members can read); no listing, no writes (the Spark uploads as admin).
+service firebase.storage {
+  match /b/{bucket}/o {
+    match /r/{secret}/{file} {
+      allow get: if true;
+      allow list, write: if false;
+    }
+    // Fundus Cloud: encrypted packages cloud_packages/<id>.bin. Access follows the Firestore document cloud_packages/<id>:
+    // sender and recipients read, only the sender writes (once, at most 500 MB) and deletes. Password accounts only.
+    match /cloud_packages/{fname} {
+      function pw() { return request.auth != null && request.auth.token.firebase.sign_in_provider == 'password'; }
+      function okName() { return fname.matches('[A-Za-z0-9_-]{16,64}[.]bin'); }
+      function pkg() { return firestore.get(/databases/(default)/documents/cloud_packages/$(fname.split('[.]')[0])).data; }
+      allow get: if pw() && okName() && (pkg().from_uid == request.auth.uid || request.auth.uid in pkg().to_uids);
+      allow create: if pw() && okName() && pkg().from_uid == request.auth.uid && pkg().ready == false
+        && request.resource.size <= 524288000;
+      allow delete: if pw() && okName() && pkg().from_uid == request.auth.uid;
+      allow list, update: if false;
+    }
+    match /{all=**} {
+      allow read, write: if false;
+    }
+  }
+}

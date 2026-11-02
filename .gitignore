@@ -1,0 +1,25 @@
+# Your archive: database, slides, datasets, photos, caches, backups – never commit
+data/
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+.pytest_cache/
+
+# Keys and credentials
+*-sa.json
+.env
+
+# Review app build output
+review-app/public/vendor/
+review-app/.firebase/
+
+# OS files
+.DS_Store
+._*
+Thumbs.db

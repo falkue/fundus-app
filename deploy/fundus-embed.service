@@ -1,0 +1,9 @@
+[Unit]
+Description=Fundus – embed new/changed items for semantic search (Ollama qwen3-embedding), prune search_log
+After=ollama.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/Projects/Software/Fundus
+ExecStart=%h/Projects/Software/Fundus/.venv/bin/python -m fundus.cli embed
+Nice=10

@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Fundus on macOS: a launchd agent that starts `fundus serve` at login and restarts it after a crash.
+  The scheduler inside the server runs the nightly import, tidy, embeddings and snapshots (fundus/scheduler.py).
+
+  Easiest: `fundus service install` fills this template and loads it. By hand: replace the __PLACEHOLDERS__,
+  save as ~/Library/LaunchAgents/org.fundus.serve.plist, then
+      launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/org.fundus.serve.plist
+  Stop and remove:  launchctl bootout gui/$(id -u)/org.fundus.serve
+-->
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>org.fundus.serve</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>__PYTHON__</string>
+		<string>-m</string>
+		<string>fundus.cli</string>
+		<string>serve</string>
+		<string>--host</string>
+		<string>__HOST__</string>
+		<string>--port</string>
+		<string>__PORT__</string>
+	</array>
+	<key>WorkingDirectory</key>
+	<string>__REPO__</string>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>PYTHONUNBUFFERED</key>
+		<string>1</string>
+	</dict>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<dict>
+		<key>SuccessfulExit</key>
+		<false/>
+	</dict>
+	<key>ThrottleInterval</key>
+	<integer>10</integer>
+	<key>StandardOutPath</key>
+	<string>__LOG__</string>
+	<key>StandardErrorPath</key>
+	<string>__LOG__</string>
+</dict>
+</plist>

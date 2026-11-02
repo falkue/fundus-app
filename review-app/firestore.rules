@@ -1,0 +1,135 @@
+rules_version = '2';
+// Fundus Review: reviewers open a personal link /r/<token>. The app signs in anonymously, reads access/<sha256(token)>
+// (only someone who knows the token can name that document) and writes claims/<uid> = {hash, review, reviewer}. From then
+// on every read and write is checked against that claim: only the own review, only while the link is active and not
+// expired, new items only in the reviewer's own name, changes only to own items that the Spark has not synced yet.
+// The Spark writes with the service account (Admin access, not bound by these rules).
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function claim() { return get(/databases/$(database)/documents/claims/$(request.auth.uid)).data; }
+    function acc(h) { return get(/databases/$(database)/documents/access/$(h)).data; }
+    function member(r) {
+      return request.auth != null
+        && exists(/databases/$(database)/documents/claims/$(request.auth.uid))
+        && claim().review == r
+        && acc(claim().hash).active == true
+        && acc(claim().hash).expires > request.time;
+    }
+    // writing additionally needs a reviewer who has not finished (all slides reviewed → read-only)
+    function writer(r) { return member(r) && acc(claim().hash).get('finished', false) != true; }
+    function textOk(t, n) { return t is string && t.size() <= n; }
+
+    match /access/{h} {
+      allow get: if request.auth != null;
+    }
+    match /claims/{uid} {
+      allow get: if request.auth != null && request.auth.uid == uid;
+      allow create: if request.auth != null && request.auth.uid == uid
+        && request.resource.data.keys().hasOnly(['hash', 'review', 'reviewer'])
+        && exists(/databases/$(database)/documents/access/$(request.resource.data.hash))
+        && acc(request.resource.data.hash).active == true
+        && acc(request.resource.data.hash).expires > request.time
+        && acc(request.resource.data.hash).review == request.resource.data.review
+        && acc(request.resource.data.hash).reviewer == request.resource.data.reviewer;
+    }
+    match /reviews/{r} {
+      allow get: if member(r);
+      match /slides/{s} { allow read: if member(r); }
+      match /reviewers/{p} { allow read: if member(r); }
+      // "Folie durchgesehen": one document per reviewer with the positions of the slides they are through with
+      match /progress/{p} {
+        allow read: if member(r);
+        allow create, update: if writer(r) && p == claim().reviewer
+          && request.resource.data.keys().hasOnly(['slides', 'updated'])
+          && request.resource.data.slides is list && request.resource.data.slides.size() <= 500
+          && request.resource.data.updated == request.time;
+      }
+      match /items/{i} {
+        allow read: if member(r);
+        allow create: if writer(r)
+          && request.resource.data.keys().hasAll(['slide', 'exhibit', 'version', 'kind', 'text', 'author', 'authorName', 'created', 'synced'])
+          && request.resource.data.keys().hasOnly(['slide', 'exhibit', 'version', 'kind', 'text', 'author', 'authorName', 'created',
+                                                   'synced', 'shape', 'verdict', 'target', 'note', 'aspect'])
+          && request.resource.data.author == claim().reviewer
+          && request.resource.data.synced == false
+          && request.resource.data.created == request.time
+          && request.resource.data.kind in ['comment', 'shape', 'check']
+          && request.resource.data.slide is int && request.resource.data.exhibit is int && request.resource.data.version is int
+          && textOk(request.resource.data.text, 4000)
+          && textOk(request.resource.data.authorName, 120)
+          && (!('note' in request.resource.data) || textOk(request.resource.data.note, 2000))
+          && (!('verdict' in request.resource.data) || request.resource.data.verdict in ['ok', 'doubt', 'wrong'])
+          && (!('aspect' in request.resource.data) || request.resource.data.aspect in ['usage', 'source'])
+          && (request.resource.data.kind != 'check' || ('verdict' in request.resource.data && 'target' in request.resource.data));
+        allow update: if writer(r)
+          && resource.data.author == claim().reviewer && resource.data.synced == false
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['text', 'note', 'verdict', 'shape']);
+        allow delete: if writer(r) && resource.data.author == claim().reviewer && resource.data.synced == false;
+      }
+    }
+    // ---------------------------------------------------------------- Fundus Cloud (fundus/cloud.py)
+    // Local Fundus installations exchange end-to-end encrypted slide packages; Firebase is only mailbox and address book.
+    // Everything requires an email/password account (reviewers of Fundus Review sign in anonymously and get nothing here).
+    function pw() {
+      return request.auth != null && request.auth.token.firebase.sign_in_provider == 'password';
+    }
+    function b64(t, n) { return t is string && t.size() <= n; }
+    function pubKeys(d) {
+      return b64(d.box_pk, 64) && b64(d.sign_pk, 64) && b64(d.fingerprint, 120);
+    }
+    // own account record: public keys, private keys wrapped with the password key and the recovery key, kdf parameters
+    match /cloud_users/{uid} {
+      allow get, delete: if pw() && request.auth.uid == uid;
+      allow create, update: if pw() && request.auth.uid == uid
+        && request.resource.data.keys().hasOnly(['email', 'box_pk', 'sign_pk', 'fingerprint', 'wrapped_pw', 'wrapped_recovery',
+                                                 'kdf', 'created', 'app'])
+        && request.resource.data.email == request.auth.token.email
+        && pubKeys(request.resource.data)
+        && b64(request.resource.data.wrapped_pw, 1000) && b64(request.resource.data.wrapped_recovery, 1000)
+        && request.resource.data.kdf is map;
+    }
+    // address book: document id = hex sha256 of the lowercase email; get only (no listing), written only by its owner
+    match /cloud_directory/{h} {
+      allow get: if pw();
+      allow create, update: if pw()
+        && h == hashing.sha256(request.auth.token.email.lower()).toHexString().lower()
+        && request.resource.data.keys().hasOnly(['uid', 'box_pk', 'sign_pk', 'fingerprint', 'updated'])
+        && request.resource.data.uid == request.auth.uid
+        && (resource == null || resource.data.uid == request.auth.uid)
+        && pubKeys(request.resource.data);
+      allow delete: if pw() && resource.data.uid == request.auth.uid;
+    }
+    // mailbox: one document per package; readable by sender and recipients; recipients may only add their own pickup
+    match /cloud_packages/{p} {
+      allow get: if pw() && (resource.data.from_uid == request.auth.uid || request.auth.uid in resource.data.to_uids);
+      allow list: if pw() && (resource.data.from_uid == request.auth.uid || request.auth.uid in resource.data.to_uids);
+      allow create: if pw()
+        && request.resource.data.keys().hasOnly(['from_uid', 'from_email', 'to_uids', 'created', 'expires', 'size', 'path',
+                                                 'sealed', 'ready', 'picked_up'])
+        && request.resource.data.from_uid == request.auth.uid
+        && request.resource.data.from_email == request.auth.token.email
+        && request.resource.data.to_uids is list && request.resource.data.to_uids.size() >= 1
+        && request.resource.data.to_uids.size() <= 20
+        && request.resource.data.path == 'cloud_packages/' + p + '.bin'
+        && request.resource.data.size is int && request.resource.data.size <= 524288000
+        && request.resource.data.created is timestamp && request.resource.data.expires is timestamp
+        && request.resource.data.expires <= request.time + duration.value(31, 'd')
+        && request.resource.data.sealed is map && request.resource.data.sealed.size() == request.resource.data.to_uids.size()
+        && request.resource.data.ready == false
+        && request.resource.data.picked_up == {};
+      allow update: if pw() && (
+        (resource.data.from_uid == request.auth.uid
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['ready'])
+          && request.resource.data.ready == true)
+        || (request.auth.uid in resource.data.to_uids
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['picked_up'])
+          && request.resource.data.picked_up.diff(resource.data.picked_up).affectedKeys().hasOnly([request.auth.uid])
+          && request.resource.data.picked_up[request.auth.uid] is timestamp));
+      allow delete: if pw() && resource.data.from_uid == request.auth.uid;
+    }
+
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<meta name="referrer" content="no-referrer">
+<title>Fundus Review</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 20 20%22%3E%3Crect width=%2220%22 height=%2220%22 rx=%226%22 fill=%22%231c1a17%22/%3E%3Cpath d=%22M6 10.5l2.6 2.6L14 7.5%22 fill=%22none%22 stroke=%22%23fff%22 stroke-width=%222%22 stroke-linecap=%22round%22 stroke-linejoin=%22round%22/%3E%3C/svg%3E">
+<link rel="stylesheet" href="/vendor/css/tokens.css">
+<link rel="stylesheet" href="/vendor/css/app.css">
+<link rel="stylesheet" href="/review.css">
+<link rel="modulepreload" href="https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js" crossorigin>
+<link rel="modulepreload" href="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js" crossorigin>
+<link rel="modulepreload" href="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js" crossorigin>
+</head>
+<body>
+<div class="rva" id="app">
+  <header class="rva-head">
+    <div class="brand"><span class="brand__logo" aria-hidden="true"></span><span class="brand__text"><span class="brand__title">Fundus Review</span><span class="brand__sub" id="who">…</span></span></div>
+    <div class="rva-head__title"><h1 id="title">Fundus Review</h1><p class="small muted" id="meta"></p></div>
+  </header>
+  <main class="rva-main" id="main" aria-live="polite">
+    <div class="skeleton" aria-hidden="true"><div class="skeleton__bar"></div><div class="skeleton__bar"></div></div>
+  </main>
+</div>
+<div class="toast" id="toast" role="status" data-show="false"></div>
+<script type="module" src="/app.js"></script>
+</body>
+</html>

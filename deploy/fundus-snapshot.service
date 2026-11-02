@@ -1,0 +1,7 @@
+[Unit]
+Description=Fundus – consistent database snapshot before the hourly restic run
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/Projects/Software/Fundus
+ExecStart=%h/Projects/Software/Fundus/.venv/bin/python -m fundus.snapshot_job

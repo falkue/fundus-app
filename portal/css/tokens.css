@@ -1,0 +1,209 @@
+/*
+ * Design-Tokens des Systemlandschafts-Dashboards – EINZIGE Stelle mit Farbwerten.
+ * ============================================================
+ * Design-System: "Circle / PostPlan" (Falks Alumni-Pulse-Variante mit blauem Akzent).
+ * Teil 1 und Teil 2 sind 1:1 aus dem Portal übernommen; Teil 3 ersetzt die
+ * Sankey-Beschäftigungs-Aliase durch Aliase für Zustände und Infrastruktur-Diagramme.
+ *
+ * Grundsätze:
+ *   - Blau ist Primärserie und Interaktion, nie Zustand.
+ *   - Zustände: ok = grün, warn = orange, crit = koralle, off = ink-4 gestrichelt,
+ *     unknown = Schraffur. Immer mit Form und Wort, nie nur Farbe.
+ *   - Schriften lokal (fonts/), kein CDN zur Laufzeit.
+ * Dark Mode: Systemeinstellung, übersteuerbar mit <html data-theme="light|dark">.
+ * ============================================================
+ */
+
+/* ---------- Schriften (lokal) ---------- */
+@font-face { font-family: "Inter"; font-style: normal; font-weight: 400; font-display: swap; src: url("../fonts/inter-latin-400-normal.woff2") format("woff2"); }
+@font-face { font-family: "Inter"; font-style: normal; font-weight: 500; font-display: swap; src: url("../fonts/inter-latin-500-normal.woff2") format("woff2"); }
+@font-face { font-family: "Inter"; font-style: normal; font-weight: 600; font-display: swap; src: url("../fonts/inter-latin-600-normal.woff2") format("woff2"); }
+@font-face { font-family: "Instrument Serif"; font-style: normal; font-weight: 400; font-display: swap; src: url("../fonts/instrument-serif-latin-400-normal.woff2") format("woff2"); }
+@font-face { font-family: "Instrument Serif"; font-style: italic; font-weight: 400; font-display: swap; src: url("../fonts/instrument-serif-latin-400-italic.woff2") format("woff2"); }
+
+/* ---------- Teil 1: Circle-Basistokens (Light) ---------- */
+:root {
+  color-scheme: light;
+  --page: #F3EFE7; --page-2: #E9E4D9;
+  --win: #FBF9F5; --card: #FFFFFF; --pane: #F6F3ED;
+  --side: rgba(238, 233, 224, .66);
+  --sel: rgba(45, 38, 28, .075); --hover: rgba(45, 38, 28, .04);
+  --ink: #22211F; --ink-2: #5D5A54; --ink-3: #8C887F; --ink-4: #B7B2A8;
+  --line: rgba(45, 38, 28, .10); --line-2: rgba(45, 38, 28, .17);
+  --blue: #3E78D8; --coral: #E05A6D; --orange: #E5893A; --yellow: #D69A1E;
+  --green: #3A9A5D; --violet: #8466D3; --grey: #8A877F;
+  --solid: #3A73D3; --onsolid: #FFFFFF;
+  --tint: 13%;
+  --w1: #C9DAF2; --w2: #BCD0EE; --w3: #D3E0F4;
+  --headline-accent: #2F66C9;
+  --shadow-card: 0 1px 2px rgba(45, 38, 28, .06), 0 6px 20px -10px rgba(45, 38, 28, .18);
+  --shadow-win: 0 0 0 .5px var(--line-2), 0 30px 70px -26px rgba(70, 45, 20, .38);
+  --serif: "Instrument Serif", "Iowan Old Style", "Palatino Linotype", Georgia, serif;
+  --sans: "Inter", -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", Arial, sans-serif;
+  --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  --r-btn: 7px; --r-input: 7px; --r-card: 11px; --r-panel: 12px; --r-pill: 999px;
+  --ink-meta: #6F6B63;
+}
+
+/* ---------- Teil 1: Circle-Basistokens (Dark) ---------- */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --page: #141312; --page-2: #1C1B19; --win: #1E1D1B; --card: #272624; --pane: #1A1918;
+    --side: rgba(44, 41, 37, .62); --sel: rgba(255, 248, 235, .09); --hover: rgba(255, 248, 235, .05);
+    --ink: #EEEBE4; --ink-2: #B4AFA6; --ink-3: #88847C; --ink-4: #5D5953;
+    --line: rgba(255, 248, 235, .085); --line-2: rgba(255, 248, 235, .14);
+    --blue: #6C9DEC; --coral: #EE7587; --orange: #EFA062; --yellow: #E5B54E; --green: #5DB67E; --violet: #A38BE7; --grey: #9D998F;
+    --solid: #3F7BDB; --tint: 20%;
+    --w1: #1b2638; --w2: #1f2a3d; --w3: #182233;
+    --headline-accent: #86AEF2;
+    --shadow-card: 0 1px 2px rgba(0, 0, 0, .3), 0 6px 20px -10px rgba(0, 0, 0, .5);
+    --shadow-win: 0 0 0 .5px var(--line-2), 0 30px 70px -26px rgba(0, 0, 0, .7);
+    --ink-meta: #A29D94;
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --page: #141312; --page-2: #1C1B19; --win: #1E1D1B; --card: #272624; --pane: #1A1918;
+  --side: rgba(44, 41, 37, .62); --sel: rgba(255, 248, 235, .09); --hover: rgba(255, 248, 235, .05);
+  --ink: #EEEBE4; --ink-2: #B4AFA6; --ink-3: #88847C; --ink-4: #5D5953;
+  --line: rgba(255, 248, 235, .085); --line-2: rgba(255, 248, 235, .14);
+  --blue: #6C9DEC; --coral: #EE7587; --orange: #EFA062; --yellow: #E5B54E; --green: #5DB67E; --violet: #A38BE7; --grey: #9D998F;
+  --solid: #3F7BDB; --tint: 20%;
+  --w1: #1b2638; --w2: #1f2a3d; --w3: #182233;
+  --headline-accent: #86AEF2;
+  --shadow-card: 0 1px 2px rgba(0, 0, 0, .3), 0 6px 20px -10px rgba(0, 0, 0, .5);
+  --shadow-win: 0 0 0 .5px var(--line-2), 0 30px 70px -26px rgba(0, 0, 0, .7);
+  --ink-meta: #A29D94;
+}
+
+/* ---------- Teil 2: Portal-Aliase (folgen Light/Dark automatisch) ---------- */
+:root {
+  --font-sans: var(--sans);
+  --font-serif: var(--serif);
+  --font-mono: var(--mono);
+  --font-size-xs: 10.5px;
+  --font-size-sm: 12px;
+  --font-size-md: 13.5px;
+  --font-size-lg: 15px;
+  --font-size-xl: 30px;
+  --font-size-2xl: 20px;
+  --font-weight-regular: 400;
+  --font-weight-medium: 500;
+  --font-weight-bold: 650;
+  --line-height: 1.45;
+  --label-tracking: .08em;
+
+  --color-bg: var(--page);
+  --color-window: var(--win);
+  --color-surface: var(--card);
+  --color-surface-muted: var(--pane);
+  --color-sidebar: var(--side);
+  --color-hover: var(--hover);
+  --color-selected: var(--sel);
+  --color-text: var(--ink);
+  --color-text-secondary: var(--ink-2);
+  --color-text-muted: var(--ink-meta);
+  --color-border: var(--line);
+  --color-border-strong: var(--line-2);
+  --color-skeleton: var(--sel);
+  --color-headline-accent: var(--headline-accent);
+  --wash-1: var(--w1);
+  --wash-2: var(--w2);
+  --wash-3: var(--w3);
+
+  --color-accent: color-mix(in srgb, var(--solid) 88%, black);
+  --color-accent-hover: color-mix(in srgb, var(--solid) 76%, black);
+  --color-accent-contrast: var(--onsolid);
+  --color-accent-soft: color-mix(in srgb, var(--blue) var(--tint), var(--card));
+  --color-focus: var(--blue);
+  --color-link: color-mix(in srgb, var(--blue) 85%, var(--ink));
+
+  --color-success-bg: color-mix(in srgb, var(--green) var(--tint), var(--card));
+  --color-success-text: color-mix(in srgb, var(--green) 70%, var(--ink));
+  --color-warning-bg: color-mix(in srgb, var(--orange) var(--tint), var(--card));
+  --color-warning-text: color-mix(in srgb, var(--orange) 55%, var(--ink));
+  --color-danger-bg: color-mix(in srgb, var(--coral) var(--tint), var(--card));
+  --color-danger-text: color-mix(in srgb, var(--coral) 70%, var(--ink));
+  --color-neutral-bg: color-mix(in srgb, var(--grey) var(--tint), var(--card));
+  --color-neutral-text: var(--ink-2);
+  --color-demo-bg: color-mix(in srgb, var(--yellow) var(--tint), var(--card));
+  --color-demo-text: color-mix(in srgb, var(--yellow) 55%, var(--ink));
+  --color-online: var(--green);
+
+  --chart-own: var(--blue);
+  --chart-own-soft: color-mix(in srgb, var(--blue) 40%, var(--card));
+  --chart-peer: var(--ink-4);
+  --chart-peer-range: var(--line-2);
+  --chart-benchmark: var(--ink-3);
+  --chart-marker: var(--ink-2);
+  --chart-band: color-mix(in srgb, var(--ink-3) 16%, transparent);
+  --chart-grid: var(--line);
+  --chart-axis-text: var(--ink-meta);
+  --chart-hatch: var(--line-2);
+  --color-ai: color-mix(in srgb, var(--violet) 80%, var(--ink));
+  --color-ai-bg: color-mix(in srgb, var(--violet) 5%, var(--card));
+  --color-ai-border: color-mix(in srgb, var(--violet) 30%, transparent);
+  --chart-flow-opacity: .28;
+  --chart-flow-opacity-hover: .55;
+  --chart-delta-up: color-mix(in srgb, var(--green) 80%, var(--ink));
+  --chart-delta-down: color-mix(in srgb, var(--coral) 80%, var(--ink));
+
+  --space-1: 0.25rem; --space-2: 0.5rem; --space-3: 0.75rem; --space-4: 1rem;
+  --space-5: 1.5rem; --space-6: 2rem; --space-7: 3rem;
+  --radius-sm: var(--r-btn); --radius-md: var(--r-card); --radius-lg: var(--r-panel); --radius-pill: var(--r-pill);
+  --shadow-window: var(--shadow-win);
+  --sidebar-width: 232px;
+  --content-max-width: 1480px;
+  --control-height: 28px;
+  --input-height: 30px;
+}
+
+/* ---------- Teil 3: Dashboard-Aliase (Zustände, Infrastruktur-Diagramme) ---------- */
+:root {
+  /* Zustandsfarben – Farbe immer zusammen mit Form und Wort */
+  --state-ok: var(--green);
+  --state-warn: var(--orange);
+  --state-crit: var(--coral);
+  --state-off: var(--ink-4);
+  --state-unknown: var(--ink-3);
+  --state-ok-bg: var(--color-success-bg);     --state-ok-text: var(--color-success-text);
+  --state-warn-bg: var(--color-warning-bg);   --state-warn-text: var(--color-warning-text);
+  --state-crit-bg: var(--color-danger-bg);    --state-crit-text: var(--color-danger-text);
+  --state-off-bg: transparent;                --state-off-text: var(--ink-2);
+  --state-unknown-bg: var(--color-neutral-bg);--state-unknown-text: var(--ink-2);
+
+  /* Reichweite (Exposition) – eine Sequenz, ein Farbton */
+  --reach-localhost: color-mix(in srgb, var(--blue) 14%, var(--card));
+  --reach-tailnet:   color-mix(in srgb, var(--blue) 38%, var(--card));
+  --reach-lan:       color-mix(in srgb, var(--blue) 66%, var(--card));
+  --reach-all:       var(--blue);
+
+  /* Zonen-Bänder der Landschaftskarte: Papier-Töne, keine Zustandsfarben */
+  --zone-internet: color-mix(in srgb, var(--coral) 4%, var(--pane));
+  --zone-tailnet:  color-mix(in srgb, var(--blue) 5%, var(--pane));
+  --zone-lan:      var(--pane);
+
+  /* Diagramm-Bausteine */
+  --chart-series: var(--blue);                                               /* Primärserie */
+  --chart-series-2: color-mix(in srgb, var(--blue) 45%, var(--card));        /* zweite, blassere Serie */
+  --chart-cap: var(--ink-2);                                                 /* Kapazitätslinie */
+  --chart-forecast: var(--ink-3);                                            /* gestrichelte Prognose */
+  --chart-today: var(--ink);                                                 /* Heute-Linie */
+  --chart-threshold: var(--orange);                                          /* Warnzone/Schwelle */
+  --chart-area: color-mix(in srgb, var(--blue) 10%, transparent);
+  --chart-track: var(--sel);                                                 /* Hintergrundspur eines Balkens */
+  --chart-label: var(--ink);
+  --chart-sub: var(--ink-2);
+  --chart-hatch-bg: var(--pane);
+
+  /* Mini-Kalender (Kalender-Heatmap), sequentiell blau */
+  --cal-0: var(--sel);
+  --cal-1: color-mix(in srgb, var(--blue) 22%, var(--card));
+  --cal-2: color-mix(in srgb, var(--blue) 45%, var(--card));
+  --cal-3: color-mix(in srgb, var(--blue) 70%, var(--card));
+  --cal-4: var(--blue);
+
+  /* Drawer */
+  --drawer-width: 400px;
+}

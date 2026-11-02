@@ -1,0 +1,9 @@
+[Unit]
+Description=Fundus snapshot hourly at :35 (restic-projects runs at :40)
+
+[Timer]
+OnCalendar=*-*-* *:35:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,10 @@
+[Unit]
+Description=Fundus – nightly tidy (automatic clean-up classes and the unit standard, journalled and undoable; open cases wait for Claude) and purge of trash entries and removed datasets older than 30 days
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/Projects/Software/Fundus
+# Falk, 1 Nov 2026: data hygiene fully automatic (fundus/tidy.py, docs/DATA-STANDARD.md); judgement cases: /fundus-tidy
+ExecStart=%h/Projects/Software/Fundus/.venv/bin/python -m fundus.cli tidy run --actor nightly:tidy
+ExecStart=%h/Projects/Software/Fundus/.venv/bin/python -m fundus.cli trash purge --expired
+ExecStart=%h/Projects/Software/Fundus/.venv/bin/python -m fundus.cli datasets purge
