@@ -10,7 +10,8 @@ Nothing user- or machine-specific is hard-coded in the code paths: every value c
 4. a default that works on a fresh single-user install (server on 127.0.0.1:8010, projects in ``~/Projects``).
 
 Keys of the config file: ``host``, ``port``, ``public_url``, ``allowed_hosts`` (list of ``host:port``), ``projects_root``,
-``mck_skill``, ``site_label``. This module imports nothing from Fundus (store.py imports it).
+``mck_skill``, ``site_label``; the optional language model (``llm_*``, see ``llm_settings``) and Gemini on Vertex AI
+(``vertex_*``, see ``vertex_settings``). This module imports nothing from Fundus (store.py imports it).
 """
 from __future__ import annotations
 
@@ -245,3 +246,106 @@ def display_path(p: Path) -> str:
         return "~/" + Path(p).resolve().relative_to(_home().resolve()).as_posix()
     except ValueError:
         return str(p)
+
+
+# ---------------------------------------------------------------- optional services: language model, Vertex AI
+# One place for the model wiring. The defaults are the reference install (Ollama on the same machine, gemma4:26b for text
+# and pictures, qwen3-embedding:8b for semantic search). Everything is optional: without a reachable model the features
+# that need one (dataset/photo descriptions, semantic search, aspect grouping, free-text questions) fall back as before.
+LLM_DEFAULTS = {
+    "llm_enabled": True,
+    "llm_url": "http://localhost:11434",
+    "llm_api": "ollama",                      # 'ollama' (native /api/…) or 'openai' (any OpenAI-compatible /v1 endpoint)
+    "llm_api_key": None,                      # only for OpenAI-compatible endpoints that want a bearer token
+    "llm_model_text": "gemma4:26b",           # describe datasets, free-text questions, entities, aspect grouping
+    "llm_model_vision": "gemma4:26b",         # photo/video annotation – must accept images
+    "llm_model_embed": "qwen3-embedding:8b",  # semantic search
+    "llm_embed_dim": 1024,                    # stored dimension (Matryoshka cut; at most the model's own dimension)
+    "llm_num_ctx": 262144,                    # Ollama context window; smaller on small machines (e.g. 32768)
+}
+# environment variables per key, the first one set wins (the older FUNDUS_OLLAMA_URL, FUNDUS_EMBED_MODEL, FUNDUS_EMBED_DIM
+# and FUNDUS_PHOTO_MODEL keep working; FUNDUS_DATASET_MODEL / FUNDUS_ENTITY_MODEL still override the text model per feature)
+LLM_ENV = {
+    "llm_enabled": ("FUNDUS_LLM_ENABLED",),
+    "llm_url": ("FUNDUS_LLM_URL", "FUNDUS_OLLAMA_URL"),
+    "llm_api": ("FUNDUS_LLM_API",),
+    "llm_api_key": ("FUNDUS_LLM_API_KEY",),
+    "llm_model_text": ("FUNDUS_LLM_MODEL_TEXT",),
+    "llm_model_vision": ("FUNDUS_LLM_MODEL_VISION", "FUNDUS_PHOTO_MODEL"),
+    "llm_model_embed": ("FUNDUS_LLM_MODEL_EMBED", "FUNDUS_EMBED_MODEL"),
+    "llm_embed_dim": ("FUNDUS_LLM_EMBED_DIM", "FUNDUS_EMBED_DIM"),
+    "llm_num_ctx": ("FUNDUS_LLM_NUM_CTX",),
+}
+
+VERTEX_DEFAULTS = {
+    "vertex_project": "fundus-review",        # Google Cloud project id – set your own
+    "vertex_location": "global",              # the newest Gemini models are served by the global endpoint only
+    "vertex_key_file": None,                  # service-account key file; default <user config dir>/fundus-review-sa.json
+    "vertex_models": None,                    # "id=Label;id=Label" or a list of ids – the first is the default model
+}
+VERTEX_ENV = {
+    "vertex_project": ("FUNDUS_VERTEX_PROJECT", "FUNDUS_GCP_PROJECT"),
+    "vertex_location": ("FUNDUS_VERTEX_LOCATION", "FUNDUS_GEMINI_LOCATION"),
+    "vertex_key_file": ("FUNDUS_VERTEX_KEY_FILE", "FUNDUS_REVIEW_KEY"),
+    "vertex_models": ("FUNDUS_VERTEX_MODELS", "FUNDUS_GEMINI_MODELS"),
+}
+
+
+def _setting(key: str, envs: tuple, default):
+    """(value, origin) – origin is 'env:NAME', 'config' or 'default'."""
+    for e in envs:
+        if os.environ.get(e) not in (None, ""):
+            return os.environ[e], f"env:{e}"
+    v = load().get(key)
+    if v not in (None, ""):
+        return v, "config"
+    return default, "default"
+
+
+def _bool(v) -> bool:
+    if isinstance(v, bool):
+        return v
+    return str(v).strip().lower() not in ("0", "false", "no", "off", "nein", "")
+
+
+def llm_settings(with_origin: bool = False) -> dict:
+    """The language-model wiring with the keys of LLM_DEFAULTS without the ``llm_`` prefix (enabled, url, api, api_key,
+    model_text, model_vision, model_embed, embed_dim, num_ctx). With ``with_origin`` also ``origin`` = {key: 'env:…' |
+    'config' | 'default'}."""
+    out, origin = {}, {}
+    for key, default in LLM_DEFAULTS.items():
+        out[key[4:]], origin[key[4:]] = _setting(key, LLM_ENV[key], default)
+    out["enabled"] = _bool(out["enabled"])
+    out["url"] = str(out["url"]).strip().rstrip("/")
+    api = str(out["api"]).strip().lower()
+    out["api"] = "openai" if api in ("openai", "openai-compatible", "openai_compatible", "v1") else "ollama"
+    for k in ("embed_dim", "num_ctx"):
+        try:
+            out[k] = int(out[k])
+        except (TypeError, ValueError):
+            out[k] = LLM_DEFAULTS["llm_" + k]
+    if with_origin:
+        out["origin"] = origin
+    return out
+
+
+def default_vertex_key_file() -> Path:
+    return user_config_dir() / "fundus-review-sa.json"
+
+
+def vertex_settings(with_origin: bool = False) -> dict:
+    """Gemini on Vertex AI: project, location, key_file (a path – this module never reads it), models [(id, label)] or
+    None for the built-in list."""
+    out, origin = {}, {}
+    for key, default in VERTEX_DEFAULTS.items():
+        out[key[7:]], origin[key[7:]] = _setting(key, VERTEX_ENV[key], default)
+    out["key_file"] = str(Path(str(out["key_file"])).expanduser()) if out["key_file"] else str(default_vertex_key_file())
+    m = out["models"]
+    if isinstance(m, str):
+        m = [(i.strip(), (lbl or i).strip()) for i, _, lbl in (x.partition("=") for x in m.split(";") if x.strip())]
+    elif isinstance(m, list):
+        m = [(str(x[0]), str(x[-1])) if isinstance(x, (list, tuple)) else (str(x).strip(), str(x).strip()) for x in m if x]
+    out["models"] = m or None
+    if with_origin:
+        out["origin"] = origin
+    return out

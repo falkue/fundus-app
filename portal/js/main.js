@@ -20,12 +20,14 @@ import * as archiv from './views/archiv.js';
 import * as daten from './views/daten.js';
 import * as verwaltung from './views/verwaltung.js';
 import * as austausch from './views/austausch.js';
+import * as forschung from './views/forschung.js';
 
 const VIEWS = [{ id: 'folien', label: 'Folien', view: folien }, { id: 'pruefungen', label: 'Prüfungen', view: pruefungen },
   { id: 'suche', label: 'Foliensuche', view: suche }, { id: 'statistik', label: 'Fundus-Statistik', view: statistik },
   { id: 'mediathek', label: 'Mediathek', view: fotos }, { id: 'fotos', label: 'Mediathek', view: fotos },   // #fotos: alte Links
   { id: 'datenqualitaet', label: 'Datenqualität', view: datenqualitaet }, { id: 'papierkorb', label: 'Papierkorb', view: papierkorb },
   { id: 'archiv', label: 'Archiv', view: archiv }, { id: 'daten', label: 'Datensätze', view: daten },
+  { id: 'forschung', label: 'Forschung', view: forschung },
   { id: 'erhalten', label: 'Erhaltene Foliensätze', view: austausch }, { id: 'gesendet', label: 'Gesendet', view: austausch.gesendet },
 
   { id: 'verwaltung', label: 'Verwaltung', view: verwaltung }];
@@ -36,6 +38,7 @@ let saved = null;      // GET /api/collections: gespeicherte Suchen (eigener Ber
 let trashN = 0;        // GET /api/trash: Einträge im Papierkorb (Zahl in der Seitenleiste)
 let archiveN = 0;      // GET /api/archive: archivierte Folien (Zahl in der Seitenleiste)
 let receivedNew = 0;   // GET /api/received: neue, noch nicht angenommene Pakete (Zahl in der Seitenleiste)
+let research = null;   // GET /api/research → stats: Hypothesen, Findings, Arbeitsliste (Zahlen in der Seitenleiste)
 
 // ---------------------------------------------------------------- Theme
 const THEME_KEY = 'fundus-theme';
@@ -207,6 +210,19 @@ function buildNav() {
       icon('ic-archive'), el('span', 'Archiv'), archiveN ? el('span.nav__count', fmt.int(archiveN)) : null),
     el('a.nav__link.nav__link--trash', { href: '#papierkorb', title: 'Gelöschte Folien, Foliensätze und Projekte – nach 30 Tagen endgültig weg' },
       icon('ic-trash'), el('span', 'Papierkorb'), trashN ? el('span.nav__count', fmt.int(trashN)) : null));
+  const rs = research?.stats ? { ...research.stats, worklist: research.stats.worklist
+    ?? Object.values(research.worklist?.counts ?? {}).reduce((a, n) => a + (n ?? 0), 0) } : null;
+  // Forschung: Übersicht (mit Arbeitsliste), Hypothesen, Findings – nur wenn der Server den Forschungsteil kennt
+  if (rs) {
+    group('Forschung',
+      el('a.nav__link.nav__link--research', { href: '#forschung', data: { rtab: 'uebersicht' }, title: 'Forschung: Serien, Arbeitsliste, Evidenzkarte' },
+        icon('ic-flask'), el('span', 'Forschung'),
+        rs.worklist ? el('span.nav__count.badge.badge--accent', { title: `${rs.worklist} offene Punkte auf der Arbeitsliste (z. B. Interpretation fehlt)` }, fmt.int(rs.worklist)) : null),
+      el('a.nav__link.nav__link--research', { href: '#forschung?tab=hypothesen', data: { rtab: 'hypothesen' }, title: 'Präregistrierte Hypothesen mit Ergebnis und Interpretation' },
+        icon('ic-hypo'), el('span', 'Hypothesen'), el('span.nav__count', fmt.int(rs.hypotheses ?? 0))),
+      el('a.nav__link.nav__link--research', { href: '#forschung?tab=findings', data: { rtab: 'findings' }, title: 'Explorative Findings – ohne vorherige Hypothese' },
+        icon('ic-finding'), el('span', 'Findings'), el('span.nav__count', fmt.int(rs.findings ?? 0))));
+  }
   group('Austausch',
     el('a.nav__link.nav__link--received', { href: '#erhalten', title: 'Foliensätze, die dir andere Fundus-Installationen geschickt haben' },
       icon('ic-inbox'), el('span', 'Erhaltene Foliensätze'), receivedNew ? el('span.nav__count.badge.badge--accent', { title: `${receivedNew} neu` }, fmt.int(receivedNew)) : null),
@@ -246,6 +262,14 @@ export function syncNav() {
   const inAdmin = location.hash.startsWith('#verwaltung');
   const inReceived = location.hash.startsWith('#erhalten');
   const inSent = location.hash.startsWith('#gesendet');
+  const inResearch = location.hash.startsWith('#forschung');
+  const rq = inResearch ? new URLSearchParams(location.hash.split('?')[1] ?? '') : null;
+  const rtab = !rq ? null : rq.get('h') ? 'hypothesen' : rq.get('f') ? 'findings' : (rq.get('tab') ?? 'uebersicht');
+  document.querySelectorAll('.nav__link--research').forEach((a) => {
+    const on = a.dataset.rtab === rtab;
+    a.classList.toggle('active', on);
+    if (on) a.setAttribute('aria-current', 'page'); else a.removeAttribute('aria-current');
+  });
   document.querySelector('.nav__link--received')?.classList.toggle('active', inReceived);
   document.querySelector('.nav__link--sent')?.classList.toggle('active', inSent);
   document.querySelector('.nav__link--data')?.classList.toggle('active', inData);
@@ -253,7 +277,7 @@ export function syncNav() {
   document.querySelector('.nav__link--archive')?.classList.toggle('active', inArchive);
   document.querySelector('.nav__link--trash')?.classList.toggle('active', inTrash);
   document.querySelector('.nav__link--photos')?.classList.toggle('active', inPhotos);
-  if (inReviews || inSearch || inStats || inPhotos || inTrash || inArchive || inData || inAdmin || inReceived || inSent) {
+  if (inReviews || inSearch || inStats || inPhotos || inTrash || inArchive || inData || inAdmin || inReceived || inSent || inResearch) {
     document.querySelectorAll('.pnav__link, .pnav__set').forEach((a) => { a.classList.remove('active', 'pnav__link--within'); a.removeAttribute('aria-current'); });
     document.querySelectorAll('.pnav__item').forEach((li) => setOpen(li, openSet.has(li.dataset.project)));
     return;
@@ -276,9 +300,10 @@ export function syncNav() {
 /** Projekte (Namen, Foliensätze, Zahlen) neu laden, z. B. nach einer Umbenennung. */
 export async function refreshNav() {
   try {
-    const [r, c, s, t, a, rc] = await Promise.all([fetch('/api/exhibits', { cache: 'no-store' }), fetch('/api/feedback/counts', { cache: 'no-store' }).catch(() => null),
+    const [r, c, s, t, a, rc, rr] = await Promise.all([fetch('/api/exhibits', { cache: 'no-store' }), fetch('/api/feedback/counts', { cache: 'no-store' }).catch(() => null),
       fetch('/api/collections', { cache: 'no-store' }).catch(() => null), fetch('/api/trash', { cache: 'no-store' }).catch(() => null),
-      fetch('/api/archive?limit=1', { cache: 'no-store' }).catch(() => null), fetch('/api/received', { cache: 'no-store' }).catch(() => null)]);
+      fetch('/api/archive?limit=1', { cache: 'no-store' }).catch(() => null), fetch('/api/received', { cache: 'no-store' }).catch(() => null),
+      fetch('/api/research?stats=1', { cache: 'no-store' }).catch(() => null)]);
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     overview = await r.json();
     fbCounts = c?.ok ? await c.json() : fbCounts;
@@ -286,6 +311,7 @@ export async function refreshNav() {
     trashN = t?.ok ? ((await t.json()).entries ?? 0) : trashN;
     archiveN = a?.ok ? ((await a.json()).total ?? 0) : archiveN;
     receivedNew = rc?.ok ? ((await rc.json()).new ?? 0) : receivedNew;
+    research = rr?.ok ? await rr.json().catch(() => research) : (rr && rr.status === 404 ? null : research);
   } catch { if (!overview) setStatus('crit', 'Fundus-Server antwortet nicht'); }
   buildNav();
 }
@@ -317,7 +343,8 @@ for (const ev of ['pointerdown', 'keydown', 'wheel', 'touchstart', 'input']) add
 const idle = () => Date.now() - lastInput > 30000 && !document.hidden && !document.querySelector('dialog[open]')
   && !document.activeElement?.closest?.('input, textarea, select, [contenteditable]');
 const dataSig = () => JSON.stringify([arr(overview?.projects).map((p) => [p.project, p.exhibits, p.versions, p.updated_at, p.archived,
-  arr(p.sets).map((x) => [x.id, x.exhibits, x.updated_at])]), fbCounts?.open, fbCounts?.decisions, arr(saved).map((c) => [c.id, c.slides]), trashN, archiveN, receivedNew]);
+  arr(p.sets).map((x) => [x.id, x.exhibits, x.updated_at])]), fbCounts?.open, fbCounts?.decisions, arr(saved).map((c) => [c.id, c.slides]), trashN, archiveN, receivedNew,
+  research?.stats ? [research.stats.hypotheses, research.stats.findings, research.stats.results, research.stats.interpretations, research.worklist?.counts] : null]);
 let pending = null;   // 'code' | 'data'
 const banner = el('div.upd-banner', { role: 'status', hidden: true });
 document.body.append(banner);

@@ -8,3 +8,7 @@ WorkingDirectory=%h/Projects/Software/Fundus
 ExecStart=%h/Projects/Software/Fundus/.venv/bin/python -m fundus.cli tidy run --actor nightly:tidy
 ExecStart=%h/Projects/Software/Fundus/.venv/bin/python -m fundus.cli trash purge --expired
 ExecStart=%h/Projects/Software/Fundus/.venv/bin/python -m fundus.cli datasets purge
+# dataset archive (3 Nov 2026): re-check the folders of reference datasets; re-hash stored originals within 20 GB per
+# night (oldest-verified first) and report orphan files – reporting only, orphans are deleted only on Falk's instruction
+ExecStartPost=-%h/Projects/Software/Fundus/.venv/bin/python -m fundus.cli datasets locations
+ExecStartPost=-%h/Projects/Software/Fundus/.venv/bin/python -m fundus.cli datasets fixity

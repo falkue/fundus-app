@@ -11,8 +11,11 @@ The newest models are only served by the global endpoint (location 'global'); th
 any of them (tested 25.10.2026 with project fundus-review). Falk picks the model per review; the default is the strongest
 generally available one. Override the list with FUNDUS_GEMINI_MODELS ("id=Label;id=Label").
 
-Auth: the service account key (FUNDUS_REVIEW_KEY, default ~/.config/fundus/fundus-review-sa.json) is exchanged for an
-access token (signed JWT); without it `gcloud auth print-access-token` is used.
+Configuration (fundus.config, `vertex_*`): project, location, key file and model list. Auth: a service-account key
+(vertex_key_file, default <user config dir>/fundus-review-sa.json, or a service-account file in
+GOOGLE_APPLICATION_CREDENTIALS) is exchanged for an access token (signed JWT); without one, Application Default
+Credentials (`gcloud auth application-default print-access-token`) and then the gcloud user login are used.
+`fundus vertex check` shows what is configured and whether the model answers.
 """
 from __future__ import annotations
 
@@ -33,11 +36,16 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 
+from fundus import config as _config
 from fundus.store import Store
 
-PROJECT = os.environ.get("FUNDUS_GCP_PROJECT", "fundus-review")
-LOCATION = os.environ.get("FUNDUS_GEMINI_LOCATION", "global")
-KEY_FILE = os.path.expanduser(os.environ.get("FUNDUS_REVIEW_KEY", "~/.config/fundus/fundus-review-sa.json"))
+# project, region, key file and model list come from fundus.config (vertex_project, vertex_location, vertex_key_file,
+# vertex_models; env FUNDUS_VERTEX_* or the older FUNDUS_GCP_PROJECT / FUNDUS_GEMINI_LOCATION / FUNDUS_REVIEW_KEY /
+# FUNDUS_GEMINI_MODELS)
+_VX = _config.vertex_settings()
+PROJECT = _VX["project"]
+LOCATION = _VX["location"]
+KEY_FILE = _VX["key_file"]
 
 # (id, label, note) – strongest first; all answered a test call on 25.10.2026 (global endpoint)
 MODELS = [
@@ -46,9 +54,8 @@ MODELS = [
     ("gemini-3.8-flash", "Gemini 3.8 Flash", "schnell und günstig, für grosse Decks"),
     ("gemini-3.5-flash", "Gemini 3.5 Flash", "älteres Flash-Modell"),
 ]
-if os.environ.get("FUNDUS_GEMINI_MODELS"):
-    MODELS = [(i.strip(), (l or i).strip(), "") for i, _, l in
-              (x.partition("=") for x in os.environ["FUNDUS_GEMINI_MODELS"].split(";") if x.strip())]
+if _VX["models"]:
+    MODELS = [(i, lbl, "") for i, lbl in _VX["models"]]
 DEFAULT = MODELS[0][0]
 
 WORKERS = 4                     # slides checked in parallel
@@ -113,24 +120,115 @@ def token() -> str:
     with _tok_lock:
         if _tok["value"] and time.time() < _tok["exp"]:
             return _tok["value"]
-        if os.path.isfile(KEY_FILE):
-            _tok["value"], _tok["exp"] = _sa_token(KEY_FILE)
+        kind, key_file = credentials()
+        if kind == "service_account":
+            _tok["value"], _tok["exp"] = _sa_token(key_file)
         else:
-            missing = (f"Gemini review is an optional extension (INSTALL.md, E3) and is not set up here: no service-account key "
-                       f"at {KEY_FILE} (FUNDUS_REVIEW_KEY) and no gcloud login")
-            try:
-                out = subprocess.run(["gcloud", "auth", "print-access-token"], capture_output=True, text=True, timeout=60)
-            except OSError:
-                raise RuntimeError(missing) from None
-            if out.returncode != 0 or not out.stdout.strip():
-                raise RuntimeError(missing)
-            _tok["value"], _tok["exp"] = out.stdout.strip(), time.time() + 1800
+            _tok["value"], _tok["exp"] = _gcloud_token(), time.time() + 1800
         return _tok["value"]
+
+
+def _sa_file(path: str | None) -> bool:
+    """True if `path` is a service-account key file (only its 'type' field is looked at; nothing is printed)."""
+    if not path or not os.path.isfile(path):
+        return False
+    try:
+        with open(path) as f:
+            return json.load(f).get("type") == "service_account"
+    except (OSError, ValueError, AttributeError):
+        return False
+
+
+def credentials() -> tuple[str, str | None]:
+    """Which credentials a Vertex call uses, without reading secrets aloud: ('service_account', path) for the configured
+    key file (vertex_key_file, default <user config dir>/fundus-review-sa.json) or a service-account file in
+    GOOGLE_APPLICATION_CREDENTIALS; else ('gcloud', None) – Application Default Credentials (`gcloud auth
+    application-default login`) or the gcloud user login."""
+    if os.path.isfile(KEY_FILE):
+        return "service_account", KEY_FILE
+    adc = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
+    if _sa_file(adc):
+        return "service_account", adc
+    return "gcloud", None
+
+
+def _gcloud_token() -> str:
+    missing = (f"Gemini review is an optional extension (INSTALL.md, E3) and is not set up here: no service-account key "
+               f"at {KEY_FILE} (vertex_key_file) and no gcloud login (gcloud auth application-default login)")
+    for cmd in (["gcloud", "auth", "application-default", "print-access-token"], ["gcloud", "auth", "print-access-token"]):
+        try:
+            out = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        except OSError:
+            raise RuntimeError(missing) from None
+        if out.returncode == 0 and out.stdout.strip():
+            return out.stdout.strip()
+    raise RuntimeError(missing)
 
 
 def endpoint(model: str) -> str:
     host = "aiplatform.googleapis.com" if LOCATION == "global" else f"{LOCATION}-aiplatform.googleapis.com"
     return f"https://{host}/v1/projects/{PROJECT}/locations/{LOCATION}/publishers/google/models/{model}:generateContent"
+
+
+def check(model: str | None = None, call: bool = True) -> dict:
+    """`fundus vertex check`: project, region, credentials (kind and path only – never key contents or tokens), model list,
+    and with `call` one tiny structured request to the model (a fraction of a cent)."""
+    import shutil
+    vx = _config.vertex_settings(with_origin=True)
+    kind, path = credentials()
+    rep = {"project": PROJECT, "location": LOCATION, "endpoint": endpoint(model or DEFAULT).split("/publishers/")[0],
+           "credentials": kind, "key_file": _config.display_path(Path(path)) if path else None,
+           "configured_key_file": _config.display_path(Path(KEY_FILE)), "gcloud": bool(shutil.which("gcloud")),
+           "models": [i for i, _, _ in MODELS], "model": model or DEFAULT, "origin": vx["origin"],
+           "config_file": str(_config.config_file() or "") or None, "checks": {}, "warnings": [], "ok": False}
+    if vx["origin"]["project"] == "default":
+        rep["warnings"].append(f"vertex_project is not set – using the built-in default '{PROJECT}'; set your own Google Cloud "
+                               "project id in the config file (vertex_project)")
+    if kind == "gcloud" and not rep["gcloud"]:
+        rep["warnings"].append("no service-account key and no gcloud CLI – install the Google Cloud CLI and run "
+                               "`gcloud auth application-default login`, or place a service-account key and set vertex_key_file")
+    try:
+        token()
+        rep["checks"]["credentials"] = {"ok": True, "kind": kind}
+    except Exception as e:     # noqa: BLE001 – a check reports everything
+        rep["checks"]["credentials"] = {"ok": False, "error": f"{type(e).__name__}: {e}"[:300]}
+        return rep
+    if not call:
+        rep["ok"] = True
+        return rep
+    try:
+        ans, usage = generate(rep["model"], [{"text": 'Reply with the JSON object {"ok": true}.'}],
+                              {"type": "OBJECT", "properties": {"ok": {"type": "BOOLEAN"}}, "required": ["ok"]}, max_tokens=1024)
+        rep["checks"]["model"] = {"ok": bool(isinstance(ans, dict) and ans.get("ok")), "answer": ans,
+                                  "tokens": usage.get("totalTokenCount")}
+    except Exception as e:     # noqa: BLE001
+        msg = f"{type(e).__name__}: {e}"[:300]
+        rep["checks"]["model"] = {"ok": False, "error": msg}
+        if "403" in msg:
+            rep["warnings"].append("403: Vertex AI API not enabled in the project, billing missing, or the account lacks "
+                                   "roles/aiplatform.user")
+        elif "404" in msg:
+            rep["warnings"].append(f"404: model '{rep['model']}' is not served in location '{LOCATION}' – try "
+                                   "vertex_location = global or another model (vertex_models)")
+    rep["ok"] = all(c.get("ok") for c in rep["checks"].values())
+    return rep
+
+
+def format_check(rep: dict) -> str:
+    o = rep.get("origin", {})
+    lines = [f"Gemini on Vertex AI: project {rep['project']} [{o.get('project', '')}], location {rep['location']} "
+             f"[{o.get('location', '')}]",
+             f"  config file:  {rep.get('config_file') or 'none (environment/defaults only)'}",
+             f"  credentials:  {rep['credentials']}" + (f" ({rep['key_file']})" if rep.get("key_file") else
+                                                         f" (no key at {rep['configured_key_file']}; gcloud CLI "
+                                                         f"{'found' if rep['gcloud'] else 'missing'})"),
+             f"  model:        {rep['model']}  (available: {', '.join(rep['models'])})"]
+    for k, v in rep.get("checks", {}).items():
+        extra = {kk: vv for kk, vv in v.items() if kk != "ok"}
+        lines.append(f"  check {k:<12} {'ok' if v.get('ok') else 'FAILED'}  {json.dumps(extra, ensure_ascii=False)[:200]}")
+    lines += [f"WARNING: {w}" for w in rep.get("warnings", [])]
+    lines.append("Result: " + ("ready for Gemini reviews" if rep["ok"] else "not ready – see above"))
+    return "\n".join(lines)
 
 
 class SearchLimit(RuntimeError):

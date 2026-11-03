@@ -203,8 +203,22 @@ export function render(root, ctx) {
       if (!st.set && arr(d.sets).length === 1) st.set = String(d.sets[0].id);   // einziger Foliensatz: vorausgewählt
       if (st.deck && st.deck !== 'all' && !st.deck.includes(':')) st.deck = `deck:${st.deck}`;   // alte Links (#…&deck=<ordner>)
       if (st.deck && st.deck !== 'all' && !ordersOf().some((o) => o.key === st.deck)) st.deck = '';
+      st.foreign = new Map();
       drawHead(); drawTools(); drawShare(); drawGrid(); drawRunning();
+      return loadForeign();
     }).catch((e) => fail(e, 'Folien'));
+  }
+  /** Decks eines Foliensatzes können Folien aus anderen Foliensätzen des Projekts enthalten (z. B. Daten-Exhibits):
+   *  diese nachladen, damit das Deck vollständig erscheint – markiert mit ihrem Foliensatz. */
+  function loadForeign() {
+    if (!st.set) return null;
+    const own = new Set(arr(st.data.exhibits).map((x) => x.id));
+    if (!ordersOf().some((o) => o.slides.some((s) => !own.has(s.id)))) return null;
+    return api(`?project=${encodeURIComponent(st.project)}`).then((all) => {
+      if (!alive) return;
+      st.foreign = new Map(arr(all.exhibits).filter((x) => !own.has(x.id)).map((x) => [x.id, x]));
+      drawGrid();
+    }).catch(() => null);
   }
   loadOverview().then((ok) => ok && loadProject()).catch((e) => fail(e, 'Projekte'));
 
@@ -478,8 +492,14 @@ export function render(root, ctx) {
   /** Sichtbare Folien in Anzeige-Reihenfolge (Deck-Reihenfolge oder neueste zuerst), gefiltert. */
   function visible(withStage = true) {
     const byId = new Map(arr(st.data.exhibits).map((x) => [x.id, x]));
-    let list;
     const order = orderNow();
+    if (order && st.foreign?.size) {
+      for (const s of order.slides) {
+        const f = !byId.has(s.id) && st.foreign.get(s.id);
+        if (f) byId.set(s.id, { ...f, otherSet: setName(setsOf().find((z) => String(z.id) === String(f.set_id)) ?? { slug: '?' }) });
+      }
+    }
+    let list;
     if (order) {
       // die Version, die in diesem Deck steckt (ältere Decks zeigen ihre älteren Folien)
       list = order.slides.map((s) => (byId.has(s.id) ? { ...byId.get(s.id), slot: s.slot,
@@ -522,10 +542,16 @@ export function render(root, ctx) {
     }
     const inOrder = new Set(order.slides.map((s) => s.id));
     const rest = arr(st.data.exhibits).filter((x) => !inOrder.has(x.id)).length;
-    if (!rest) return null;
-    const btn = el('button.btn.btn--small', { type: 'button' }, 'Alle Folien zeigen');
-    btn.addEventListener('click', () => { st.deck = 'all'; drawTools(); drawGrid(); });
-    return el('p.small.fg-outside', `Gezeigt wird die Reihenfolge „${order.label}“ mit ${fmt.int(order.slides.length)} Folien; ${fmt.int(rest)} weitere Folien stehen in keiner Deck-Reihenfolge. `, btn);
+    const own = new Set(arr(st.data.exhibits).map((x) => x.id));
+    const other = st.set ? order.slides.filter((s) => !own.has(s.id)).length : 0;
+    if (!rest && !other) return null;
+    const set = setOf();
+    const parts = [`Gezeigt wird das Deck „${order.label}“ mit ${fmt.int(order.slides.length)} Folien`];
+    if (other) parts.push(`davon ${fmt.int(other)} aus anderen Foliensätzen (an der Kachel vermerkt)`);
+    const txt = `${parts.join(', ')}.${rest ? ` ${fmt.int(rest)} Folien${set ? ` des Foliensatzes ${setName(set)}` : ''} stehen nicht in diesem Deck.` : ''} `;
+    const btn = rest ? el('button.btn.btn--small', { type: 'button' }, set ? 'Alle Folien des Foliensatzes zeigen' : 'Alle Folien zeigen') : null;
+    btn?.addEventListener('click', () => { st.deck = 'all'; drawTools(); drawGrid(); });
+    return el('p.small.fg-outside', txt, btn);
   }
 
   function drawGrid() {
@@ -549,7 +575,7 @@ export function render(root, ctx) {
       stageBar(),
       set?.locked ? el('p.small.fg-locked', icon('ic-lock', 'fg-lock__icon'), ` Foliensatz gesperrt seit ${lockWhen(set.locked)}${set.locked.note ? ` · ${set.locked.note}` : ''}`) : null,
       outsideNote(),
-      el('p.small.muted.fg-count', `${fmt.int(list.length)} von ${fmt.int(all)} Folien${set ? ` im Foliensatz ${setName(set)}` : ''}${orderNow() ? `, Reihenfolge ${orderNow().label}` : ', neueste zuerst'}${st.fav ? ', nur Favoriten' : ''}${st.kind !== 'all' || st.q ? ' (gefiltert)' : ''}`),
+      el('p.small.muted.fg-count', `${orderNow() ? `${fmt.int(list.length)} von ${fmt.int(orderNow().slides.length)} Folien im Deck ${orderNow().label}` : `${fmt.int(list.length)} von ${fmt.int(all)} Folien${set ? ` im Foliensatz ${setName(set)}` : ''}, neueste zuerst`}${st.fav ? ', nur Favoriten' : ''}${st.kind !== 'all' || st.q ? ' (gefiltert)' : ''}`),
       list.length ? grid : card({}, emptyNote(st.fav ? 'Keine Favoriten in dieser Auswahl. Den Stern setzt du an einer Folie (oben rechts an der Kachel oder in der Grossansicht).' : 'Keine Folie passt zu dieser Auswahl.'))));
   }
 
@@ -749,6 +775,7 @@ function tile(x, open, { selected = false, open: fb = null, status = null, onTog
 function tags(x, compact) {
   const row = el('span.fg-tags');
   row.append(badge(KIND[x.kind] ?? x.kind, 'outline'));
+  if (x.otherSet) row.append(el('span.fg-tag', { title: `Diese Folie gehört zum Foliensatz ${x.otherSet}; das Deck verwendet sie.` }, `aus ${x.otherSet}`));
   if (isNum(x.versions) && x.versions > 1) row.append(el('span.fg-tag', { title: `${x.versions} Versionen` }, `v${x.version ?? x.versions} von ${x.versions}`));
   const d = DENSITY[x.density];
   if (d && (x.density !== 'OK' || !compact)) row.append(el('span.fg-tag', { title: `Dichteprüfung: ${x.density}` }, mark(d[0]), d[1]));

@@ -33,8 +33,8 @@ from fundus.geo import canonical_geo
 from fundus import config as _config
 from fundus.store import Store, slug as _slug
 
-TABLE_EXT = {"csv", "tsv", "txt", "dat", "xlsx", "xlsm", "json", "jsonl", "ndjson", "parquet"}   # .dat: delimited text (Census: '|')
-DOC_EXT = {"pdf", "md", "docx", "doc", "rtf", "html", "htm", "pptx", "odt", "xml"}               # .xml: e.g. SDMX structures
+TABLE_EXT = {"csv", "tsv", "txt", "dat", "xlsx", "xlsm", "json", "jsonl", "ndjson", "parquet", "gz"}   # gz: only .csv.gz/.tsv.gz   # .dat: delimited text (Census: '|')
+DOC_EXT = {"pdf", "md", "docx", "doc", "rtf", "html", "htm", "xhtml", "pptx", "odt", "xml"}      # .xml: e.g. SDMX structures; .xhtml: EUR-Lex
 MAX_BYTES = 50 * 1024 ** 3
 PREVIEW_MAX = 500
 QUERY_MAX_ROWS = 2000
@@ -44,13 +44,17 @@ SAMPLE_FROM = 2_000_000          # from this many rows, examples and frequent va
 SAMPLE_ROWS = 1_000_000
 PORTAL_UPLOAD_MAX = 2 * 1024 ** 3   # larger files: fundus_dataset_add / `fundus datasets add` (no detour through a browser)
 PUBLIC_URL = _config.public_url()   # $FUNDUS_PUBLIC_URL, config file, the running server, else http://127.0.0.1:8010
-LLM_MODEL = os.environ.get("FUNDUS_DATASET_MODEL", "gemma4:26b")
+LLM_MODEL = os.environ.get("FUNDUS_DATASET_MODEL") or _config.llm_settings()["model_text"]   # llm_model_text (fundus.config)
 DESCRIBE_TIMEOUT = int(os.environ.get("FUNDUS_DATASET_TIMEOUT", "1800"))   # seconds for one description by the local model
 RETRY_TIMEOUTS = 3                 # a description that timed out is tried again (busy model), up to this many attempts
 RETRY_AFTER_H = 2                  # … at the earliest this many hours after the last attempt
 EDITABLE = {"title", "description", "source_title", "publisher", "url", "license", "published", "period", "geo", "project",
             "visibility", "keywords", "tags", "note", "frequency", "next_expected", "update_hint", "last_checked",
-            "kind", "crosswalk", "code_systems", "table_scope", "inputs", "confirm_public"}
+            "kind", "crosswalk", "code_systems", "table_scope", "inputs", "confirm_public",
+            # catalog & archive (3 Nov 2026): lifecycle and provenance
+            "lifecycle", "superseded_by", "lifecycle_note", "retrieved_at", "script",
+            # texts with versions (3 Nov 2026, fundus.dataset_texts): setting act_type makes a dataset a text
+            "identifier", "jurisdiction", "act_type", "issuer"}
 KINDS = ("data", "crosswalk")
 TABLE_SCOPES = ("version", "merged")
 # crosswalk metadata (dataset.crosswalk JSON); a table may carry several system pairs in from_system/to_system columns
@@ -114,18 +118,48 @@ def _duck(store: Store | None = None):
 
 
 # ------------------------------------------------------------------ reading tables into Parquet
+def _gz_table(name: str) -> bool:
+    """A gzip-compressed delimited text table (x.csv.gz, x.tsv.gz, x.txt.gz) – read by DuckDB without unpacking."""
+    return bool(re.search(r"\.(csv|tsv|txt|dat)\.gz$", name.lower()))
+
+
 def _csv_options(p: Path) -> str:
     """Delimiter and decimal separator: a ';'-separated file is the German/Swiss convention with decimal commas."""
-    with open(p, "r", encoding="utf-8", errors="replace") as f:
+    import gzip
+    opener = gzip.open if p.suffix.lower() == ".gz" else open
+    with opener(p, "rt", encoding="utf-8", errors="replace") as f:
         head = f.read(65536)
     try:
         delim = csv.Sniffer().sniff(head, delimiters=";,\t|").delimiter
     except csv.Error:
         delim = "\t" if head.count("\t") > head.count(",") else ","
     opts = f"delim={_q(delim)}, header=true, sample_size=200000, ignore_errors=true"
+    skip = _preamble_rows(head, delim)
+    if skip:
+        opts += f", skip={skip}"
     if delim == ";":
         opts += ", decimal_separator=','"
     return opts
+
+
+def _preamble_rows(head: str, delim: str) -> int:
+    """Lines to skip before the real header: a short metadata block followed by a blank line (e.g. SNB data portal CSVs:
+    'CubeId;…', 'PublishingDate;…', blank, then 'Date;D0;Value'). Only when every preamble line has fewer fields than the
+    header after the blank line, and the blank line comes within the first 10 lines."""
+    lines = head.lstrip("\ufeff").splitlines()[:40]
+    for i, line in enumerate(lines[:10]):
+        if line.strip() or i == 0:
+            continue
+        before = [ln for ln in lines[:i] if ln.strip()]
+        after = [ln for ln in lines[i + 1:] if ln.strip()]
+        if not before or len(after) < 2:
+            return 0
+        width = lambda ln: len(next(csv.reader([ln], delimiter=delim)))
+        hdr = width(after[0])
+        if hdr >= 2 and all(width(ln) < hdr for ln in before) and all(width(ln) == hdr for ln in after[1:6]):
+            return i + 1
+        return 0
+    return 0
 
 
 def _xlsx_sheets(p: Path, work: Path) -> list[tuple[str, Path]]:
@@ -141,7 +175,10 @@ def _xlsx_sheets(p: Path, work: Path) -> list[tuple[str, Path]]:
             for row in ws.iter_rows(values_only=True):
                 if n == 0 and not any(v not in (None, "") for v in row):
                     continue
-                w.writerow(["" if v is None else (v.isoformat() if hasattr(v, "isoformat") else v) for v in row])
+                vals = ["" if v is None else (v.isoformat() if hasattr(v, "isoformat") else v) for v in row]
+                if n == 0:   # multi-line question headers (survey exports): one line per column name
+                    vals = [" ".join(str(v).split()) if isinstance(v, str) else v for v in vals]
+                w.writerow(vals)
                 n += 1
         if n > 1:
             out.append((ws.title, f))
@@ -155,9 +192,12 @@ def _to_parquet(store: Store, src: Path, ext: str, work: Path, stem: str) -> lis
     out = []
     try:
         if ext in ("xlsx", "xlsm"):
-            sources = [(name, f"read_csv({_q(f)}, header=true, sample_size=-1)") for name, f in _xlsx_sheets(src, work)]
+            sources = [(name, f"read_csv({_q(f)}, header=true, delim=',', quote='\"', escape='\"', sample_size=-1)")
+                       for name, f in _xlsx_sheets(src, work)]   # our own CSV: no dialect sniffing (fails on multi-line cells)
         elif ext in ("csv", "tsv", "txt", "dat"):
             sources = [(stem, f"read_csv({_q(src)}, {_csv_options(src)})")]
+        elif ext == "gz":                    # x.csv.gz: stem is 'x.csv'
+            sources = [(re.sub(r"\.(csv|tsv|txt|dat)$", "", stem, flags=re.I), f"read_csv({_q(src)}, {_csv_options(src)}, compression='gzip')")]
         elif ext in ("json", "jsonl", "ndjson"):
             sources = [(stem, f"read_json_auto({_q(src)}, maximum_object_size=268435456)")]
         elif ext == "parquet":
@@ -239,9 +279,15 @@ def add(store: Store, paths, title: str | None = None, description: str | None =
         keywords: list[str] | None = None, frequency: str | None = None, next_expected: str | None = None,
         update_hint: str | None = None, actor: str = "cli", progress=None, kind: str | None = None,
         crosswalk: dict | None = None, code_systems: dict | None = None, inputs: list | None = None,
-        table_scope: str | None = None) -> dict:
+        table_scope: str | None = None, retrieved_at: str | None = None, script: str | None = None,
+        text: bool = False, identifier: str | None = None, jurisdiction: str | None = None, act_type: str | None = None,
+        issuer: str | None = None, valid_from: str | None = None, valid_to: str | None = None,
+        version_label: str | None = None, published_at: str | None = None, source_url: str | None = None) -> dict:
     """Store files as a dataset (or as a new version of `dataset`). Tables become Parquet and get profiled; other files
-    are kept as documents. Linked data: kind ('crosswalk' with crosswalk metadata), code_systems of columns, inputs (the
+    are kept as documents. text=True (or a new version of a text): a text with versions (fundus.dataset_texts) – every
+    file is kept as delivered as a document (never a table); act_type (new text), identifier, jurisdiction, issuer on the
+    dataset; valid_from (required), valid_to, version_label, published_at, source_url on the version. A new version ends
+    earlier open versions the day before its valid_from (explicit valid_to values stay). Linked data: kind ('crosswalk' with crosswalk metadata), code_systems of columns, inputs (the
     datasets it was built from – lineage; internal inputs make it internal), table_scope ('merged': tables across versions).
     A new version of a derived dataset without `inputs` keeps the previous inputs at their current versions (it was rebuilt
     from them). Returns {dataset, slug, version, tables, documents, skipped, warnings}."""
@@ -257,6 +303,18 @@ def add(store: Store, paths, title: str | None = None, description: str | None =
         raise ValueError(f"frequency: {' | '.join(FREQUENCIES)}")
     if next_expected and not ISO_MONTH.match(next_expected):
         raise ValueError("next_expected: ISO month, e.g. 2027-09")
+    if retrieved_at and not ISO_MONTH.match(retrieved_at):
+        raise ValueError("retrieved_at: ISO date, e.g. 2026-11-03")
+    if dataset not in (None, "") and (_row(store, dataset)["holding"] or "stored") == "reference":
+        raise ValueError("this dataset is a reference (raw data stays where it is); register a new reference instead")
+    from fundus import dataset_texts as tx
+    existing = _row(store, dataset) if dataset not in (None, "") else None
+    text = bool(text or act_type or (existing is not None and tx.is_text(existing)))
+    if text:
+        if kind or crosswalk or table_scope:
+            raise ValueError("a text with versions has no kind/crosswalk/table_scope")
+        tmeta = tx.check_meta(act_type=act_type, valid_from=valid_from, valid_to=valid_to, published_at=published_at,
+                              need_act_type=existing is None or not tx.is_text(existing))
     files = _collect(paths)
     if not files:
         raise ValueError("no files")
@@ -269,13 +327,13 @@ def add(store: Store, paths, title: str | None = None, description: str | None =
             if f.stat().st_size > MAX_BYTES:
                 skipped.append({"file": str(f), "why": "larger than 50 GB"})
                 continue
-            if ext not in TABLE_EXT | DOC_EXT:
-                skipped.append({"file": str(f), "why": f"unknown format .{ext}"})
+            if ext not in TABLE_EXT | DOC_EXT or (ext == "gz" and not _gz_table(f.name)):
+                skipped.append({"file": str(f), "why": f"unknown format .{ext}" + (" (only .csv.gz/.tsv.gz tables)" if ext == "gz" else "")})
                 continue
             sha = _sha_file(f)
             _store_file(store, f, sha, ext)
             entry = {"name": f.name, "sha": sha, "ext": ext, "bytes": f.stat().st_size, "source_path": str(f)}
-            if ext in DOC_EXT or (ext in ("txt", "dat") and not _looks_tabular(f)):
+            if text or ext in DOC_EXT or (ext in ("txt", "dat") and not _looks_tabular(f)):
                 docs.append(entry)
             else:
                 try:
@@ -315,20 +373,30 @@ def add(store: Store, paths, title: str | None = None, description: str | None =
                          (did, n, note, now, actor))
         for t in tables:
             store.db.execute("INSERT INTO dataset_file(dataset_id, version, role, name, table_name, sha, ext, bytes, source_path, "
-                             "parquet_sha, rows, profile) VALUES (?,?,'table',?,?,?,?,?,?,?,?,?)",
+                             "parquet_sha, rows, profile, columns_n) VALUES (?,?,'table',?,?,?,?,?,?,?,?,?,?)",
                              (did, n, t["name"], t["table"], t["sha"], t["ext"], t["bytes"], t["source_path"], t["parquet_sha"],
-                              t["rows"], json.dumps(t["profile"], ensure_ascii=False, default=str)))
+                              t["rows"], json.dumps(t["profile"], ensure_ascii=False, default=str), len(t["profile"]["columns"])))
         for dct in docs:
             store.db.execute("INSERT INTO dataset_file(dataset_id, version, role, name, sha, ext, bytes, source_path) "
                              "VALUES (?,?,'document',?,?,?,?,?)", (did, n, dct["name"], dct["sha"], dct["ext"], dct["bytes"], dct["source_path"]))
-        upd = {k: v for k, v in (("frequency", frequency), ("next_expected", next_expected), ("update_hint", update_hint)) if v}
+        upd = {k: v for k, v in (("frequency", frequency), ("next_expected", next_expected), ("update_hint", update_hint),
+                                 ("retrieved_at", retrieved_at), ("script", script)) if v}
         if dataset not in (None, ""):        # a new edition arrived: it counts as checked today
             upd["last_checked"] = now[:10]
         if upd:
             store.db.execute(f"UPDATE dataset SET {', '.join(f'{k} = ?' for k in upd)} WHERE id = ?", (*upd.values(), did))
         store.log("dataset", did, "insert" if n == 1 else "version", {"version": n, "tables": len(tables), "documents": len(docs)})
         slug = store.db.execute("SELECT slug FROM dataset WHERE id = ?", (did,)).fetchone()[0]
-        warnings = []
+        warnings, closed = [], []
+        if text:
+            tf = {k: v.strip() for k, v in (("identifier", identifier), ("jurisdiction", jurisdiction), ("act_type", act_type),
+                                            ("issuer", issuer)) if v and v.strip()}
+            if not (frequency or (existing is not None and existing["frequency"])):
+                tf["frequency"] = "irregular"      # new versions appear irregularly: tracked by due()/update_targets
+            if tf:
+                store.db.execute(f"UPDATE dataset SET {', '.join(f'{k} = ?' for k in tf)} WHERE id = ?", (*tf.values(), did))
+            closed = tx.apply_version(store, did, n, valid_from=tmeta["valid_from"], valid_to=tmeta["valid_to"],
+                                      version_label=version_label, published_at=tmeta["published_at"], source_url=source_url)
         if inputs is None and n > 1:           # rebuilt: same inputs, now at their current versions
             prev = [{"ref": f"dataset:{r['input_id']}", "note": r["note"]} for r in store.db.execute(
                 "SELECT input_id, note FROM dataset_input WHERE dataset_id = ? AND version = ?", (did, n - 1))]
@@ -350,6 +418,7 @@ def add(store: Store, paths, title: str | None = None, description: str | None =
         if linked:
             warnings += _update_linked(store, did, linked)
     return {"dataset": did, "ref": f"dataset:{did}", "slug": slug, "version": n, **({"warnings": warnings} if warnings else {}),
+            **({"text": True, "closed": closed} if text else {}),
             "tables": [{"table": t["table"], "file": t["name"], "rows": t["rows"], "columns": len(t["profile"]["columns"])} for t in tables],
             "documents": [d["name"] for d in docs], "skipped": skipped}
 
@@ -429,8 +498,18 @@ def period_from_data(tabs) -> str | None:
 
 def describe_one(store: Store, did: int, llm=None) -> dict:
     d = _row(store, did)
+    from fundus import dataset_texts as tx
+    if tx.is_text(d):            # a text: metadata, beginning (title, preamble) and headings only – never the whole text
+        prompt, text_input = tx.prompt(store, d, _vocab(store))
+        return _describe_answer(store, d, [], prompt, llm, {"input": text_input})
     tabs = _tables(store, d)
     lines, sample = [], "(no table)"
+    if (d["holding"] or "stored") == "reference":     # raw data stays where it is: README/Markdown and file listing only
+        from fundus import dataset_catalog as cat
+        listing, readme = cat.reference_inputs(store, d)
+        tabs = []
+        lines = [f"(a reference dataset: the files below are NOT read; describe it from the listing and the documents)\n{listing}"]
+        sample = f"(no data rows are read – README/Markdown files instead)\n{readme}"
     for t in tabs[:6]:
         prof = json.loads(t["profile"] or "{}")
         cols = "; ".join(f"{c['name']}: {c['type']} ({', '.join(c.get('examples', [])[:3])})" for c in prof.get("columns", [])[:60])
@@ -447,6 +526,11 @@ def describe_one(store: Store, did: int, llm=None) -> dict:
     given = json.dumps({k: d[k] for k in ("title", "description", "source_title", "publisher", "published", "project") if d[k]}
                        | ({"documents": docs} if docs else {}), ensure_ascii=False)
     prompt = PROMPT.format(given=given, tables="\n".join(lines) or "(none)", sample=sample, vocab=_vocab(store))
+    return _describe_answer(store, d, tabs, prompt, llm)
+
+
+def _describe_answer(store: Store, d, tabs, prompt: str, llm=None, extra: dict | None = None) -> dict:
+    """Ask the local model and store summary, keywords, tags, period, geo and column meanings (failures are recorded)."""
     try:
         ans = (llm or _chat()).complete("You answer with JSON only.", prompt)
         if not isinstance(ans, dict):
@@ -464,7 +548,8 @@ def describe_one(store: Store, did: int, llm=None) -> dict:
         tags[f] = list(dict.fromkeys(list(vals) + tags.get(f, [])))
     ann = {"model": getattr(llm or _chat(), "model", "llm"), "at": datetime.now().isoformat(timespec="seconds"),
            "unit_of_observation": ans.get("unit_of_observation"),
-           "columns": {str(k)[:120]: str(v)[:200] for k, v in (ans.get("columns") or {}).items()} if isinstance(ans.get("columns"), dict) else {}}
+           "columns": {str(k)[:120]: str(v)[:200] for k, v in (ans.get("columns") or {}).items()} if isinstance(ans.get("columns"), dict) else {},
+           **(extra or {})}
     kw = list(dict.fromkeys(json.loads(d["keywords"] or "[]") + [str(k)[:60] for k in (ans.get("keywords") or []) if isinstance(k, str)]))[:25]
     clean = lambda v, n=1500: " ".join(v.split())[:n] if isinstance(v, str) and v.strip() else None
     store.db.execute(
@@ -546,27 +631,45 @@ def _visible(d, include_internal: bool, project: str | None) -> bool:
     return include_internal or d["visibility"] != "internal" or (project and d["project"] == _slug(project))
 
 
-def _brief(store: Store, d) -> dict:
-    tabs = _tables(store, d)
-    docs = _files(store, d["id"], d["current_version"], "document")
+def _brief(store: Store, d, agg: dict | None = None) -> dict:
+    """Short form of a dataset. columns = columns of the main (largest) table; columns_max / columns_total over all tables.
+    agg: precomputed counts (dataset_catalog.aggregate + stale, publisher_group) – the catalog passes them in bulk."""
+    from fundus import dataset_catalog as cat
+    if agg is None:
+        agg = cat.aggregate(d, cat.file_rows(store, d["id"]))
+        if (d["holding"] or "stored") == "reference":
+            loc = cat.location(store, d["id"], manifest=False)
+            agg["bytes"] = (loc or {}).get("bytes") or 0
+    stale = agg["stale"] if "stale" in agg else stale_inputs(store, d)
+    group = agg["publisher_group"] if "publisher_group" in agg else cat.publisher_group(store, d["publisher"])
+    life = d["lifecycle"] or "active"
     out = {"id": d["id"], "ref": f"dataset:{d['id']}", "slug": d["slug"], "title": d["title"],
            "summary": d["summary_de"] or d["summary_en"] or d["description"], "summary_en": d["summary_en"],
-           "publisher": d["publisher"], "published": d["published"], "period": d["period"], "geo": d["geo"],
+           "publisher": d["publisher"], "publisher_group": group, "published": d["published"], "period": d["period"], "geo": d["geo"],
            "project": d["project"], "visibility": d["visibility"], "status": d["status"], "version": d["current_version"],
-           "tables": len(tabs), "rows": sum(t["rows"] or 0 for t in tabs),
-           "columns": sum(len(json.loads(t["profile"] or "{}").get("columns", [])) for t in tabs),
-           "bytes": sum({f["sha"]: f["bytes"] or 0 for f in list(tabs) + list(docs)}.values()),   # a workbook once, not per sheet
-           "formats": sorted({t["ext"] for t in tabs} | {x["ext"] for x in docs}),
+           "lifecycle": life, "holding": d["holding"] or "stored",
+           **({"superseded_by": d["superseded_by"], "successor": f"dataset:{d['superseded_by']}"} if life == "superseded" else {}),
+           "tables": agg["tables"], "rows": agg["rows"], "columns": agg["columns"], "columns_max": agg["columns_max"],
+           "columns_total": agg["columns_total"],
+           "bytes": agg["bytes"],   # a workbook once, not per sheet; a reference: the size of its location
+           "formats": agg["formats"],
            "keywords": json.loads(d["keywords"] or "[]")[:12], "tags": json.loads(d["tags"] or "{}"),
            "updated_at": d["updated_at"], "frequency": d["frequency"], "next_expected": d["next_expected"],
            "last_checked": d["last_checked"], "update_due": due_reason(d),
-           "kind": d["kind"] if d["kind"] != "data" else None,
+           "kind": "text" if d["act_type"] else d["kind"] if d["kind"] != "data" else None,
+           **({"identifier": d["identifier"], "jurisdiction": d["jurisdiction"], "act_type": d["act_type"], "issuer": d["issuer"],
+               "in_force": _texts().in_force(store, d)} if d["act_type"] else {}),
            "code_systems": sorted(set(code_systems_of(d).values())) or None,
            "crosswalk_pairs": [f"{p_.get('from_system')} → {p_.get('to_system')}" for p_ in _json(d["crosswalk"], {}).get("pairs") or []][:12] or None,
-           "stale_inputs": stale_inputs(store, d) or None}
+           "stale_inputs": stale or None}
     if d["removed_at"]:
         out["removed_at"] = d["removed_at"]
     return {k: v for k, v in out.items() if v not in (None, "", [], {})}
+
+
+def _texts():
+    from fundus import dataset_texts
+    return dataset_texts
 
 
 def _text(store: Store, d) -> str:
@@ -580,22 +683,43 @@ def _text(store: Store, d) -> str:
                                      " ".join(v for vals in tags.values() for v in vals), " ".join(cols),
                                      " ".join(f"{k} {v}" for k, v in (ann.get("columns") or {}).items()),
                                      " ".join(code_systems_of(d).values()), d["kind"] if d["kind"] != "data" else "",
+                                     d["identifier"], d["jurisdiction"], d["issuer"],
+                                     f"{d['act_type']} {_texts().LABELS[d['act_type']]} text" if d["act_type"] else "",
+                                     " ".join(r[0] for r in store.db.execute("SELECT version_label FROM dataset_version WHERE "
+                                              "dataset_id = ? AND version_label IS NOT NULL", (d["id"],))) if d["act_type"] else "",
                                      " ".join(f"{p_.get('from_system')} {p_.get('to_system')}" for p_ in _json(d["crosswalk"], {}).get("pairs") or []))
                     if x)
 
 
 def search(store: Store, text: str = "", project: str | None = None, include_internal: bool = False, removed: bool = False,
            limit: int = 50, visible_project: str | None = None, kind: str | None = None, code_system: str | None = None,
-           stale: bool = False) -> dict:
+           stale: bool = False, lifecycle: str | None = None, jurisdiction: str | None = None, act_type: str | None = None) -> dict:
     """Datasets for a question (words matched against title, description, summaries, keywords, tags, column names and
     meanings, code systems, source, project; all datasets without text), best first. kind: data | crosswalk; code_system:
-    only datasets with a column in that system (or crosswalks from/to it); stale: only derived datasets with a newer input."""
+    only datasets with a column in that system (or crosswalks from/to it); stale: only derived datasets with a newer input.
+    kind 'text': texts with versions; jurisdiction (EU, CH …) and act_type narrow to texts.
+    lifecycle: withdrawn datasets are left out unless lifecycle='all' (or 'withdrawn'); 'active' | 'superseded' narrow it."""
     where, args = ["removed_at IS NOT NULL" if removed else "removed_at IS NULL"], []
-    if kind:
+    if lifecycle in (None, ""):
+        where.append("lifecycle != 'withdrawn'")
+    elif lifecycle != "all":
+        if lifecycle not in ("active", "superseded", "withdrawn"):
+            raise ValueError("lifecycle: active | superseded | withdrawn | all")
+        where.append("lifecycle = ?")
+        args.append(lifecycle)
+    if kind == "text":
+        where.append("act_type IS NOT NULL")
+    elif kind:
         if kind not in KINDS:
-            raise ValueError(f"kind: {' | '.join(KINDS)}")
-        where.append("kind = ?")
+            raise ValueError(f"kind: {' | '.join(KINDS)} | text")
+        where.append("kind = ? AND act_type IS NULL")
         args.append(kind)
+    if jurisdiction:
+        where.append("upper(jurisdiction) = upper(?)")
+        args.append(jurisdiction.strip())
+    if act_type:
+        where.append("act_type = ?")
+        args.append(act_type)
     if project:
         where.append("project = ?")
         args.append(_slug(project))
@@ -621,10 +745,24 @@ def search(store: Store, text: str = "", project: str | None = None, include_int
 
 
 def get(store: Store, ref, include_internal: bool = True, project: str | None = None) -> dict:
+    from fundus import dataset_catalog as cat
     d = _row(store, ref)
     if not _visible(d, include_internal, project):
         raise PermissionError(f"dataset {ref} is internal; pass include_internal=true or its project")
-    out = _brief(store, d)
+    out = {}
+    life = d["lifecycle"] or "active"
+    if life == "superseded":
+        s = store.db.execute("SELECT title FROM dataset WHERE id = ?", (d["superseded_by"],)).fetchone()
+        out["notice"] = (f"ERSETZT: dieser Datensatz ist ersetzt durch dataset:{d['superseded_by']}"
+                         f"{' (' + s[0] + ')' if s else ''} – für neue Analysen den Nachfolger verwenden.")
+    elif life == "withdrawn":
+        out["notice"] = ("ZURÜCKGEZOGEN: dieser Datensatz ist zurückgezogen und soll nicht mehr verwendet werden"
+                         + (f" ({d['lifecycle_note']})" if d["lifecycle_note"] else "") + ".")
+    if (d["holding"] or "stored") == "reference":
+        loc = cat.location(store, d["id"], manifest=False) or {}
+        out["notice"] = ((out["notice"] + " ") if out.get("notice") else "") + \
+            f"REFERENZ: die Daten liegen unter {loc.get('path')}, nicht in Fundus gespeichert (keine Vorschau, keine Abfrage)."
+    out.update(_brief(store, d))
     ann = json.loads(d["annotation"] or "{}")
     meanings = ann.get("columns") or {}
     out.update({k: d[k] for k in ("description", "summary_de", "source_title", "url", "license", "note", "created_at", "created_by",
@@ -660,19 +798,37 @@ def get(store: Store, ref, include_internal: bool = True, project: str | None = 
         out["tables_detail"].append({"id": t["id"], "file": t["name"], "table": t["table_name"], "rows": t["rows"], "format": t["ext"],
                                      **({"version": t["version"]} if t["version"] != d["current_version"] else {}), **({"sampled": prof["sampled"]} if prof.get("sampled") else {}),
                                      "bytes": t["bytes"], "path": str(file_path(store, t["parquet_sha"], "parquet")),
+                                     "verified_at": t["verified_at"], "verified_ok": t["verified_ok"],
                                      "original_path": str(file_path(store, t["sha"], t["ext"])),
                                      "download_url": url(t["sha"], t["ext"], t["name"]), "columns": prof.get("columns", [])})
     out["documents"] = [{"id": x["id"], "file": x["name"], "format": x["ext"], "bytes": x["bytes"],
+                         "verified_at": x["verified_at"], "verified_ok": x["verified_ok"],
                          "path": str(file_path(store, x["sha"], x["ext"])), "download_url": url(x["sha"], x["ext"], x["name"])}
                         for x in _files(store, d["id"], d["current_version"], "document")]
-    out["versions"] = [dict(r) for r in store.db.execute("SELECT n, note, created_at, created_by FROM dataset_version "
-                                                         "WHERE dataset_id = ? ORDER BY n DESC", (d["id"],))]
+    out["versions"] = _texts().versions(store, d)      # a text: validity per version, the one in force, files per version
+    cat.detail_extras(store, d, out)
+    from fundus import research
+    out["research"] = research.research_for_dataset(store, d["id"], include_internal=include_internal, project=project)
+    if d["act_type"]:
+        out["text"] = {"act_type_label": _texts().LABELS[d["act_type"]],
+                       "how_to_use": "A text with versions: versions[] has valid_from/valid_to and the files of each version; "
+                                     "fundus_dataset(ref, action='at', at='YYYY-MM-DD') names the version valid at a date. "
+                                     "The files are stored as delivered – parse or compare them only in a concrete analysis "
+                                     "(Spark script, result as its own derived dataset)."}
     out["how_to_use"] = ("Load a table directly: duckdb.sql(\"SELECT * FROM read_parquet('<path>')\") or "
                          "pandas.read_parquet('<path>'); or fundus_dataset(ref, action='query', sql=…) with the table names as views.")
     return out
 
 
+def _refuse_reference(store: Store, d) -> None:
+    if (d["holding"] or "stored") == "reference":
+        r = store.db.execute("SELECT path FROM dataset_location WHERE dataset_id = ? ORDER BY version DESC LIMIT 1", (d["id"],)).fetchone()
+        raise ValueError(f"dataset:{d['id']} liegt als Referenz unter {r[0] if r else '?'}, nicht in Fundus gespeichert – "
+                         "keine Vorschau und keine Abfrage; die Dateien dort direkt lesen")
+
+
 def _table(store: Store, d, table) -> "sqlite3.Row":
+    _refuse_reference(store, d)
     tabs = _tables(store, d)
     if not tabs:
         raise LookupError("this dataset has no table")
@@ -733,6 +889,7 @@ def query(store: Store, ref, sql: str, limit: int = 500) -> dict:
     """Read-only SQL over the dataset's tables (DuckDB). Each table is a view named after it (see `views`); the first
     (main = largest) table is also `t`. Only SELECT/WITH; no file access, no writes; at most 2000 rows back, 60 s."""
     d = _row(store, ref)
+    _refuse_reference(store, d)
     sql = (sql or "").strip().rstrip(";")
     if not re.match(r"(?is)^\s*(select|with)\b", sql) or ";" in sql or _FORBIDDEN.search(re.sub(r"'[^']*'", "''", sql)):
         raise ValueError("only one SELECT/WITH query over the dataset's tables (no file functions, no writes)")
@@ -784,6 +941,7 @@ def update(store: Store, ref, changes: dict, actor: str = "cli") -> dict:
     inputs = changes.pop("inputs", None)
     confirm_public = bool(changes.pop("confirm_public", False))
     linked = {k: changes.pop(k) for k in ("kind", "crosswalk", "code_systems", "table_scope") if k in changes}
+    life = {k: changes.pop(k) for k in ("lifecycle", "superseded_by", "lifecycle_note") if k in changes}
     warnings = []
     if changes.get("visibility") == "public" and d["visibility"] != "public":
         internal = internal_inputs(store, d["id"])
@@ -800,15 +958,20 @@ def update(store: Store, ref, changes: dict, actor: str = "cli") -> dict:
             v = json.dumps({f: list(vals) for f, vals in (v or {}).items() if f in ("industry", "topic", "region")})
         elif k == "visibility" and v not in ("public", "internal"):
             raise ValueError("visibility: public | internal")
+        elif k == "act_type" and v not in (None, "") and v not in _texts().ACT_TYPES:
+            raise ValueError(f"act_type: {' | '.join(_texts().ACT_TYPES)}")
         elif k == "frequency" and v not in (None, "") and v not in FREQUENCIES:
             raise ValueError(f"frequency: {' | '.join(FREQUENCIES)}")
-        elif k in ("next_expected", "last_checked") and v not in (None, "") and not ISO_MONTH.match(str(v).strip()):
+        elif k in ("next_expected", "last_checked", "retrieved_at") and v not in (None, "") and not ISO_MONTH.match(str(v).strip()):
             raise ValueError(f"{k}: ISO month or date, e.g. 2027-09")
         elif k == "project":
             v = _slug(v) if v else None
         elif isinstance(v, str):
             v = v.strip() or None
         ch[k] = v
+    if life:
+        from fundus import dataset_catalog as cat
+        ch.update(cat.check_lifecycle(store, d, life))
     ch = {k: v for k, v in ch.items() if d[k] != v}
     with store.batch(actor):
         if ch:

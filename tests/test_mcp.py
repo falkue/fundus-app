@@ -186,7 +186,9 @@ def test_http_server_initialize_and_host_protection(db):
         port = sk.getsockname()[1]
     root = Path(__file__).resolve().parent.parent
     import os
-    env = {**os.environ, "FUNDUS_ALLOWED_HOSTS": "fundus.example.ts.net:8010", "FUNDUS_SCHEDULER": "0"}
+    cfg = Path(str(db)).parent / "config-empty.json"   # never the live data/config.json of this machine
+    cfg.write_text("{}")
+    env = {**os.environ, "FUNDUS_ALLOWED_HOSTS": "fundus.example.ts.net:8010", "FUNDUS_SCHEDULER": "0", "FUNDUS_CONFIG": str(cfg)}
     env.pop("FUNDUS_PUBLIC_URL", None)
     proc = subprocess.Popen([sys.executable, "-m", "fundus.mcp_server", "--db", str(db), "--host", "127.0.0.1",
                              "--port", str(port)], cwd=root, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env)
@@ -316,3 +318,27 @@ def test_document_brackets_stay_with_the_document(db):
     c = call(m.fundus_add, "fact", {"kind": "definition", "title": "BFS fact", "what": "z"}, tags=tags,
              document={"title": "Statistik", "publisher": "Bundesamt für Statistik (BFS)"})
     assert call(m.fundus_get, "fact", str(c["id"]))["document"]["publisher"]["name"] == "Bundesamt für Statistik (BFS)"
+
+
+def test_api_call_retries_locked_write(db, monkeypatch):
+    """A write that collides with another process ('database is locked') is retried before the portal sees an error."""
+    import sqlite3
+    from fundus import mcp_server as m
+    m.configure(db)
+    monkeypatch.setattr(m.time, "sleep", lambda s: None)
+    calls = []
+
+    def fn(st):
+        calls.append(1)
+        if len(calls) < 3:
+            raise sqlite3.OperationalError("database is locked")
+        return {"ok": True}
+
+    class Req:
+        method = "POST"
+        query_params = {}
+        headers = {}
+        class url:
+            path = "/api/trash"
+    r = m._api_call(Req(), fn)
+    assert len(calls) == 3 and r.status_code == 200

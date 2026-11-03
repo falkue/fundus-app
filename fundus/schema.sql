@@ -326,8 +326,22 @@ CREATE TABLE IF NOT EXISTS dataset (
   crosswalk       TEXT,                   -- JSON (kind crosswalk): from/to systems and versions, validity, quality, method,
                                           -- column roles, pairs found in the table
   code_systems    TEXT,                   -- JSON {"table/column" | "column": "NAICS-2022"} – code system of a column
-  table_scope     TEXT NOT NULL DEFAULT 'version' CHECK (table_scope IN ('version','merged'))  -- merged: newest copy of every
+  table_scope     TEXT NOT NULL DEFAULT 'version' CHECK (table_scope IN ('version','merged')),  -- merged: newest copy of every
                                           -- table across versions (a version that re-delivers only some tables keeps the rest)
+  -- catalog & archive (3 Nov 2026, fundus.dataset_catalog)
+  lifecycle       TEXT NOT NULL DEFAULT 'active' CHECK (lifecycle IN ('active','superseded','withdrawn')),
+  superseded_by   INTEGER,                -- successor dataset (lifecycle superseded)
+  lifecycle_note  TEXT, lifecycle_at TEXT,
+  holding         TEXT NOT NULL DEFAULT 'stored' CHECK (holding IN ('stored','reference')),  -- reference: raw data stays
+                                          -- where it is (dataset_location), nothing copied, profiled or converted
+  retrieved_at    TEXT,                   -- when the data was downloaded/obtained (citation)
+  script          TEXT,                   -- script that produced or fetched it (provenance)
+  -- texts with versions (3 Nov 2026, fundus.dataset_texts): laws, regulations, guidelines, standards, terms, policies.
+  -- A dataset is a text when act_type is set; its versions are the text's versions (Fassungen) with their validity.
+  identifier      TEXT,                   -- official identifier: ELI, CELEX, SR number, URL
+  jurisdiction    TEXT,                   -- EU, CH, DE, US, … (or 'global' for a provider policy)
+  act_type        TEXT CHECK (act_type IN ('law','regulation','directive','ordinance','guideline','standard','terms','policy','other')),
+  issuer          TEXT                    -- issuing body (parliament, ministry, standards body, provider)
 );
 -- lineage: a derived dataset (version) built from input datasets (versions); stale when an input has a newer version
 CREATE TABLE IF NOT EXISTS dataset_input (
@@ -346,6 +360,12 @@ CREATE TABLE IF NOT EXISTS dataset_version (
   note       TEXT,
   created_at TEXT NOT NULL,
   created_by TEXT,
+  -- a version of a text (dataset.act_type set): its validity and where it was published
+  valid_from   TEXT,                    -- ISO date from which this version applies
+  valid_to     TEXT,                    -- ISO date of its last day (inclusive); NULL = still valid
+  version_label TEXT,                   -- e.g. 'konsolidierte Fassung vom 27.07.2026'
+  published_at TEXT,                    -- ISO date of publication (official journal, website)
+  source_url   TEXT,                    -- where this version was obtained
   PRIMARY KEY (dataset_id, n)
 );
 CREATE TABLE IF NOT EXISTS dataset_file (
@@ -359,9 +379,36 @@ CREATE TABLE IF NOT EXISTS dataset_file (
   source_path TEXT,
   parquet_sha TEXT,                       -- table: the Parquet copy DuckDB reads
   rows        INTEGER,
-  profile     TEXT                        -- JSON: rows, columns [{name, type, nulls_pct, distinct, min, max, …, examples, top}]
+  profile     TEXT,                       -- JSON: rows, columns [{name, type, nulls_pct, distinct, min, max, …, examples, top}]
+  columns_n   INTEGER,                    -- table: number of columns (cached from the profile, for fast catalog counts)
+  verified_at TEXT,                       -- fixity: last re-hash of the original (+ Parquet copy opened)
+  verified_ok INTEGER                     -- 1 ok, 0 failed, NULL never checked
 );
 CREATE INDEX IF NOT EXISTS ix_dataset_file ON dataset_file(dataset_id, version);
+-- usage log of datasets (sessions, portal, CLI): show/preview/query/update count as uses, search_hit/ask_hit/portal_view as seen
+CREATE TABLE IF NOT EXISTS dataset_use (
+  id         INTEGER PRIMARY KEY,
+  ts         TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  dataset_id INTEGER NOT NULL,
+  version    INTEGER,
+  tool       TEXT NOT NULL,             -- show | preview | query | update | path | search_hit | ask_hit | portal_view
+  actor      TEXT,                      -- mcp | portal | cli
+  project    TEXT,
+  detail     TEXT
+);
+CREATE INDEX IF NOT EXISTS ix_dataset_use ON dataset_use(dataset_id, ts);
+-- where a reference dataset lies (holding 'reference'): a folder or file on the Spark, checked nightly
+CREATE TABLE IF NOT EXISTS dataset_location (
+  dataset_id   INTEGER NOT NULL REFERENCES dataset(id) ON DELETE CASCADE,
+  version      INTEGER NOT NULL DEFAULT 1,
+  path         TEXT NOT NULL,
+  bytes        INTEGER, files INTEGER,
+  newest_mtime TEXT,
+  checked_at   TEXT,
+  status       TEXT,                    -- ok | missing | changed
+  manifest     TEXT,                    -- JSON [{name, bytes, mtime}] (at most 2000 entries, then {"more": N})
+  PRIMARY KEY (dataset_id, version)
+);
 
 CREATE TABLE IF NOT EXISTS changelog (
   id        INTEGER PRIMARY KEY,
@@ -1058,3 +1105,175 @@ CREATE TABLE IF NOT EXISTS exhibit_foreign_stage (
   UNIQUE (exhibit_id, content_hash, origin)
 );
 CREATE INDEX IF NOT EXISTS ix_exhibit_foreign_stage ON exhibit_foreign_stage(exhibit_id);
+
+-- Research registry (fundus.research, 3 Nov 2026): series, hypotheses (strictly pre-registered), findings (exploratory),
+-- results, interpretations, evidence and links. Visibility internal by default; a frozen pre-registration and the
+-- deviations are append-only (the triggers at the end refuse UPDATE/DELETE).
+CREATE TABLE IF NOT EXISTS research_series (
+  id            INTEGER PRIMARY KEY,
+  slug          TEXT NOT NULL UNIQUE,         -- e.g. serie-8
+  title         TEXT NOT NULL,
+  programme     TEXT,                         -- research programme / cluster
+  project       TEXT,                         -- Fundus project slug
+  summary       TEXT,
+  proposal_path TEXT,                         -- RESEARCH-PROPOSAL.md / CONCEPT.md
+  theory_cards  TEXT,                         -- JSON [{id, name, scholars [{name, works [{title, doi}]}], claim}]
+  visibility    TEXT NOT NULL DEFAULT 'internal' CHECK (visibility IN ('public','internal')),
+  source        TEXT NOT NULL DEFAULT 'registered',   -- registered | imported:<path>
+  created_by    TEXT,
+  created_at    TEXT NOT NULL,
+  updated_at    TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS hypothesis (
+  id                   INTEGER PRIMARY KEY,
+  code                 TEXT NOT NULL,         -- H8.1 (unique per series), generated H<series>.<n> / H-<n>
+  series_id            INTEGER REFERENCES research_series(id) ON DELETE SET NULL,
+  kind                 TEXT NOT NULL DEFAULT 'quantitative' CHECK (kind IN ('quantitative','qualitative','mixed')),
+  title                TEXT,
+  statement            TEXT NOT NULL,
+  direction            TEXT CHECK (direction IN ('+','−','≠','none')),
+  theory_refs          TEXT,                  -- JSON list of theory card ids of the series (or free names)
+  status               TEXT NOT NULL DEFAULT 'idea'
+                       CHECK (status IN ('idea','preregistered','running','result','revised','withdrawn')),
+  visibility           TEXT NOT NULL DEFAULT 'internal' CHECK (visibility IN ('public','internal')),
+  published_in         TEXT,                  -- publication (citation / URL); visibility public only on request
+  project              TEXT,
+  tags                 TEXT,                  -- JSON {industry: [], topic: [], region: []} (Fundus vocabulary)
+  aliases              TEXT,                  -- JSON list of other codes (folder name, 'H12' of series 5 …)
+  derived_from_finding INTEGER REFERENCES finding(id) ON DELETE SET NULL,
+  revises              INTEGER REFERENCES hypothesis(id) ON DELETE SET NULL,
+  withdrawn_reason     TEXT,
+  source               TEXT NOT NULL DEFAULT 'registered',   -- registered | imported:<path>
+  imported_partial     INTEGER NOT NULL DEFAULT 0,           -- only listed in a proposal/summary, no result folder
+  meta                 TEXT,                  -- JSON: proposal columns (data, method, threats, feasibility …)
+  created_by           TEXT,
+  created_at           TEXT NOT NULL,
+  updated_at           TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_hypothesis_code ON hypothesis(coalesce(series_id, 0), code);
+CREATE TABLE IF NOT EXISTS hypothesis_prereg (
+  hypothesis_id   INTEGER PRIMARY KEY REFERENCES hypothesis(id) ON DELETE CASCADE,
+  statement       TEXT, direction TEXT, unit TEXT, sample TEXT,
+  measures        TEXT,                       -- operationalisation / measures (markdown)
+  data            TEXT,                       -- JSON [{ref: 'dataset:N', version, note}] or material (qualitative)
+  method          TEXT, controls TEXT,
+  decision_rule   TEXT,                       -- supported if … / not supported if … / else inconclusive
+  robustness_plan TEXT,
+  extra           TEXT,                       -- JSON: further fields (power, placebos, theory, coding frame …)
+  text            TEXT,                       -- the pre-registration as written (markdown, imports)
+  frozen_at       TEXT,                       -- NULL = draft; set = immutable
+  sha256          TEXT,                       -- of the canonical JSON of the frozen fields
+  time_source     TEXT,                       -- registered | stamp | heading | unknown (imports without a timestamp)
+  source          TEXT NOT NULL DEFAULT 'registered',   -- registered | imported:<file>
+  created_at      TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS hypothesis_deviation (
+  id            INTEGER PRIMARY KEY,
+  hypothesis_id INTEGER NOT NULL REFERENCES hypothesis(id) ON DELETE CASCADE,
+  at            TEXT NOT NULL,
+  field         TEXT NOT NULL,
+  before        TEXT,
+  after         TEXT,
+  reason        TEXT NOT NULL,
+  timing        TEXT NOT NULL CHECK (timing IN ('before_analysis','after_data_seen')),
+  by            TEXT
+);
+CREATE INDEX IF NOT EXISTS ix_hypothesis_deviation ON hypothesis_deviation(hypothesis_id);
+CREATE TABLE IF NOT EXISTS hypothesis_result (
+  id            INTEGER PRIMARY KEY,
+  hypothesis_id INTEGER NOT NULL REFERENCES hypothesis(id) ON DELETE CASCADE,
+  verdict       TEXT NOT NULL CHECK (verdict IN ('supported','partly_supported','not_supported','inconclusive')),
+  effect        TEXT,
+  estimate      REAL, ci_low REAL, ci_high REAL, ci_text TEXT, unit TEXT,
+  n             INTEGER, n_text TEXT,
+  robustness    TEXT, caveats TEXT,
+  method_doc    TEXT,                         -- markdown: model, specification, estimation, diagnostics
+  scripts       TEXT,                         -- JSON [{path, sha256}]
+  run_log       TEXT, environment TEXT,
+  inputs        TEXT,                         -- JSON [{ref: 'dataset:N', version, note}]
+  outputs       TEXT,                         -- JSON [refs: dataset:N, exhibit:N]
+  measures      TEXT,                         -- JSON (further numbers)
+  sample_run    INTEGER NOT NULL DEFAULT 0,   -- 1 = run on a sample / pilot (not the full data)
+  partial_data  TEXT,                         -- what was incomplete when it ran
+  skipped       INTEGER NOT NULL DEFAULT 0,   -- 1 = not testable at that time (verdict inconclusive)
+  at            TEXT NOT NULL,
+  by            TEXT,
+  source        TEXT NOT NULL DEFAULT 'registered',   -- registered | imported:<file>
+  created_at    TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_hypothesis_result ON hypothesis_result(hypothesis_id, at);
+CREATE TABLE IF NOT EXISTS finding (
+  id           INTEGER PRIMARY KEY,
+  code         TEXT NOT NULL,                 -- F<series>.<n> / F-<n>
+  series_id    INTEGER REFERENCES research_series(id) ON DELETE SET NULL,
+  kind         TEXT NOT NULL DEFAULT 'qualitative' CHECK (kind IN ('qualitative','quantitative','mixed')),
+  title        TEXT,
+  statement    TEXT NOT NULL,
+  strength     TEXT CHECK (strength IN ('single_observation','recurring_pattern','saturated','quantified')),
+  context      TEXT,                          -- JSON {setting, sample, period}
+  method       TEXT,
+  detail       TEXT,                          -- markdown (the full note, imports)
+  theory_refs  TEXT,
+  status       TEXT NOT NULL DEFAULT 'recorded' CHECK (status IN ('draft','recorded','revised','withdrawn')),
+  visibility   TEXT NOT NULL DEFAULT 'internal' CHECK (visibility IN ('public','internal')),
+  published_in TEXT,
+  project      TEXT,
+  tags         TEXT,
+  aliases      TEXT,
+  exploratory  INTEGER NOT NULL DEFAULT 1 CHECK (exploratory = 1),   -- a finding is never confirmatory
+  withdrawn_reason TEXT,
+  source       TEXT NOT NULL DEFAULT 'registered',
+  created_by   TEXT,
+  created_at   TEXT NOT NULL,
+  updated_at   TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_finding_code ON finding(coalesce(series_id, 0), code);
+CREATE TABLE IF NOT EXISTS interpretation (
+  id           INTEGER PRIMARY KEY,
+  owner_kind   TEXT NOT NULL CHECK (owner_kind IN ('hypothesis_result','finding')),
+  owner_id     INTEGER NOT NULL,
+  summary      TEXT, explanation TEXT, alternatives TEXT, limits TEXT, theory TEXT, relations TEXT, next TEXT,
+  author       TEXT,
+  at           TEXT NOT NULL,
+  source       TEXT NOT NULL DEFAULT 'registered'
+);
+CREATE INDEX IF NOT EXISTS ix_interpretation ON interpretation(owner_kind, owner_id, id);
+CREATE TABLE IF NOT EXISTS research_evidence (
+  id           INTEGER PRIMARY KEY,
+  owner_kind   TEXT NOT NULL CHECK (owner_kind IN ('hypothesis_result','finding')),
+  owner_id     INTEGER NOT NULL,
+  kind         TEXT NOT NULL CHECK (kind IN ('dataset','observation','document','exhibit','photo','video','quote','note','file')),
+  ref          TEXT,                          -- dataset:95, observation:4871, photo:12, a file path …
+  version      INTEGER,
+  quote        TEXT,
+  speaker_role TEXT,                          -- interview quotes: role only, never names of private persons
+  note         TEXT,
+  created_by   TEXT,
+  created_at   TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_research_evidence ON research_evidence(owner_kind, owner_id);
+CREATE INDEX IF NOT EXISTS ix_research_evidence_ref ON research_evidence(ref);
+CREATE TABLE IF NOT EXISTS research_link (
+  id         INTEGER PRIMARY KEY,
+  from_kind  TEXT NOT NULL CHECK (from_kind IN ('hypothesis','finding')),
+  from_id    INTEGER NOT NULL,
+  to_kind    TEXT NOT NULL CHECK (to_kind IN ('hypothesis','finding')),
+  to_id      INTEGER NOT NULL,
+  relation   TEXT NOT NULL CHECK (relation IN ('sharpens','replicates','contradicts','extends','derived_from',
+                                               'competes_with','revises')),
+  note       TEXT,
+  created_by TEXT,
+  created_at TEXT NOT NULL,
+  UNIQUE (from_kind, from_id, to_kind, to_id, relation)
+);
+CREATE VIRTUAL TABLE IF NOT EXISTS research_index USING fts5(
+  item_kind UNINDEXED, item_id UNINDEXED, body, tokenize = 'unicode61 remove_diacritics 2'
+);
+CREATE TRIGGER IF NOT EXISTS tr_prereg_frozen_update BEFORE UPDATE ON hypothesis_prereg
+  WHEN OLD.frozen_at IS NOT NULL BEGIN SELECT RAISE(ABORT, 'pre-registration is frozen: record a deviation instead'); END;
+CREATE TRIGGER IF NOT EXISTS tr_prereg_frozen_delete BEFORE DELETE ON hypothesis_prereg
+  WHEN OLD.frozen_at IS NOT NULL BEGIN SELECT RAISE(ABORT, 'pre-registration is frozen'); END;
+CREATE TRIGGER IF NOT EXISTS tr_deviation_update BEFORE UPDATE ON hypothesis_deviation
+  BEGIN SELECT RAISE(ABORT, 'deviations are append-only'); END;
+CREATE TRIGGER IF NOT EXISTS tr_deviation_delete BEFORE DELETE ON hypothesis_deviation
+  BEGIN SELECT RAISE(ABORT, 'deviations are append-only'); END;

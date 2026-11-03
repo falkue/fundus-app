@@ -1,4 +1,5 @@
-"""Embeddings for semantic search (Ollama, qwen3-embedding:8b by default), stored for millions of items.
+"""Embeddings for semantic search (the optional local model – Ollama or an OpenAI-compatible server, configured in
+fundus.config: llm_url, llm_api, llm_model_embed, default qwen3-embedding:8b), stored for millions of items.
 
 Each item (observation, forecast, study, quote, practice, fact, series, exhibit = slide/chart) gets a short kind-specific text
 (`item_text`) that is embedded once; a hash of that text (+ visibility) means only new or changed items are
@@ -36,11 +37,14 @@ from datetime import datetime, timedelta, timezone
 
 import numpy as np
 
+from fundus import llm
 from fundus.store import ITEM_KINDS, Store
 
-OLLAMA_URL = os.environ.get("FUNDUS_OLLAMA_URL", "http://localhost:11434").rstrip("/")
-MODEL = os.environ.get("FUNDUS_EMBED_MODEL", "qwen3-embedding:8b")
-DIM = int(os.environ.get("FUNDUS_EMBED_DIM", "1024"))
+# endpoint and model come from fundus.config (llm_url, llm_model_embed, llm_embed_dim); these names stay for callers
+_LLM = llm.settings()
+OLLAMA_URL = _LLM["url"]
+MODEL = _LLM["model_embed"]
+DIM = _LLM["embed_dim"]
 QUANT = os.environ.get("FUNDUS_EMBED_QUANT", "int8")
 QUANTS = ("float32", "float16", "int8")
 KEEP_ALIVE = "30m"
@@ -54,8 +58,9 @@ ACTIVE_KEY = "embedding.active"
 SEARCH_LOG_RETENTION_DAYS = 180
 
 
-class EmbedUnavailable(RuntimeError):
-    """Embedding is not possible right now (Ollama down, model capacity rule, timeout)."""
+# Embedding is not possible right now (model switched off, server down, model capacity rule, timeout) – the same class
+# as llm.Unavailable, so callers catching either see every model failure
+EmbedUnavailable = llm.Unavailable
 
 
 # ------------------------------------------------------------------ spaces
@@ -86,7 +91,9 @@ class Space:
 
 
 def default_space() -> Space:
-    return Space(MODEL, DIM, QUANT)
+    """The configured embedding space (llm_model_embed, llm_embed_dim; read now, so a changed config applies)."""
+    s = llm.settings()
+    return Space(s["model_embed"], s["embed_dim"], QUANT)
 
 
 def active_space(store: Store) -> Space | None:
@@ -170,17 +177,31 @@ def bits(vecs: np.ndarray) -> list[bytes]:
 
 # ------------------------------------------------------------------ embedders
 class OllamaEmbedder:
-    """Calls Ollama /api/embed. `embed_documents` for item texts, `embed_query` for search queries."""
+    """Calls Ollama /api/embed (or /v1/embeddings of an OpenAI-compatible server, llm_api = 'openai').
+    `embed_documents` for item texts, `embed_query` for search queries."""
 
-    def __init__(self, model: str = MODEL, dim: int = DIM, url: str = OLLAMA_URL, keep_alive: str = KEEP_ALIVE):
-        self.model, self.dim, self.url, self.keep_alive = model, dim, url, keep_alive
+    def __init__(self, model: str | None = None, dim: int | None = None, url: str | None = None,
+                 keep_alive: str = KEEP_ALIVE):
+        s = llm.settings()
+        self.model, self.dim = model or s["model_embed"], dim or s["embed_dim"]
+        self.url, self.keep_alive, self.api = (url or s["url"]).rstrip("/"), keep_alive, s["api"]
 
     def _post(self, path: str, body: dict, timeout: float) -> dict:
         req = urllib.request.Request(self.url + path, json.dumps(body).encode(), {"Content-Type": "application/json"})
         with urllib.request.urlopen(req, timeout=timeout) as r:
             return json.loads(r.read())
 
+    def raw_embed(self, texts: list[str], timeout: float = 300.0) -> list[list[float]]:
+        """Vectors as the model returns them (full dimension, not normalised) – one try, no capacity check."""
+        s = llm.require()
+        if self.api == "openai":
+            return llm.openai_embed(self.model, texts, timeout, {**s, "url": self.url})
+        body = {"model": self.model, "input": texts, "keep_alive": self.keep_alive, "truncate": True}
+        return self._post("/api/embed", body, timeout).get("embeddings") or []
+
     def loaded_models(self, timeout: float = 2.0) -> list[str]:
+        if self.api != "ollama":
+            return []
         try:
             with urllib.request.urlopen(self.url + "/api/ps", timeout=timeout) as r:
                 return [m.get("name") or m.get("model") for m in json.loads(r.read()).get("models", [])]
@@ -189,21 +210,27 @@ class OllamaEmbedder:
 
     def check_capacity(self, timeout: float = 2.0) -> None:
         """Raise EmbedUnavailable if loading the model would exceed FUNDUS_MAX_MODELS (no check without a limit)."""
-        if MAX_LOADED_MODELS <= 0:
+        llm.require()
+        if MAX_LOADED_MODELS <= 0 or self.api != "ollama":
             return
         loaded = self.loaded_models(timeout)
         if not capacity_ok(loaded, self.model):
             raise EmbedUnavailable(f"ollama busy: {', '.join(loaded)} loaded; not loading {self.model} (FUNDUS_MAX_MODELS={MAX_LOADED_MODELS})")
 
     def _embed(self, texts: list[str], timeout: float, retries: int) -> np.ndarray:
+        llm.require()
         body = {"model": self.model, "input": texts, "keep_alive": self.keep_alive, "truncate": True}
         last = None
         for attempt in range(retries + 1):
             try:
-                data = self._post("/api/embed", body, timeout)
+                if self.api == "openai":
+                    embs = llm.openai_embed(self.model, texts, timeout, {**llm.settings(), "url": self.url})
+                    data = {"embeddings": embs}
+                else:
+                    data = self._post("/api/embed", body, timeout)
                 embs = data.get("embeddings")
                 if not embs or len(embs) != len(texts):
-                    raise EmbedUnavailable(f"unexpected answer from ollama: {str(data)[:200]}")
+                    raise EmbedUnavailable(f"unexpected answer from the embedding model: {str(data)[:200]}")
                 return normalise(embs, self.dim)
             except (OSError, ValueError, EmbedUnavailable) as e:
                 last = e

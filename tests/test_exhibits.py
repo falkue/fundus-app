@@ -1120,3 +1120,20 @@ def test_scan_skips_pictures_without_source(tmp_path):
     names = sorted(Path(i["png"]).stem for i in items)
     assert names == ["chart", "chart-copy", "export-01"], names
     assert sum("not slide-shaped" in s["reason"] for s in skipped) == 2
+
+
+def test_scan_skips_a_fundus_data_folder(tmp_path):
+    """The nightly sync must never read Fundus' own content-addressed store as renders (3 Nov 2026: 3,698 stored files
+    became a project 'fundus' after a received package put a render path inside the Fundus folder)."""
+    from fundus import exhibits as ex
+    proj = tmp_path / "Fundus"
+    data = proj / "data"
+    (data / "exhibits" / "ab").mkdir(parents=True)
+    (data / "fundus.sqlite").write_bytes(b"")
+    (data / "exhibits" / "ab" / ("ab" * 32 + ".png")).write_bytes(b"\x89PNG")
+    (proj / "slides").mkdir()
+    (proj / "slides" / "real.png").write_bytes(b"\x89PNG")
+    items, skipped = ex.scan(proj)
+    names = [str(x) for x in items] + [str(x) for x in skipped]
+    assert not any("/data/" in n for n in names)
+    assert ex._fundus_data(data / "exhibits") and not ex._fundus_data(proj / "slides")

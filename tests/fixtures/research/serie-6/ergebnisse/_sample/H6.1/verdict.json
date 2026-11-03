@@ -1,0 +1,13 @@
+{
+ "h": "H6.1",
+ "verdict": "inconclusive",
+ "effect": "log-odds A vs B = -0.09",
+ "ci": "[-0.37, 0.19]",
+ "n": 1600,
+ "robustness": "sample run",
+ "caveats": "sample run (fixture)",
+ "inputs": ["dataset:47", "dataset:100"],
+ "sample": true,
+ "partial_data": "Wayback index partial",
+ "time": "2026-11-01 12:00"
+}

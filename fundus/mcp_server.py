@@ -22,6 +22,7 @@ import sqlite3
 import functools
 import threading
 import time
+import sys
 from datetime import date
 from pathlib import Path
 from typing import Any
@@ -54,7 +55,8 @@ Foliensuche: fundus_slide_search(question, year, min_confidence) finds slides ac
 Every slide carries a verification stage (fundus_search/fundus_exhibit: review_stage + confidence 0-3: no_sources/unchecked 0, open/changed 1, incorporated/checked 2, confirmed 3). When assembling a FINAL deck use slides with confidence >= 2; leave out slides with confidence <= 1 or tell Falk which ones are doubtful and why (fundus_exhibit shows review_status with open points and unsourced numbers). When building a slide, name ALL sources it was built from in the file – also those not in the visible source line – with mck.page(..., sources=[{title, url, publisher, published}], fundus=['observation:4871', …]) (or fundus_exhibit_link): no number on a slide without a source; reviewers and Gemini check exactly these.
 Reviews and feedback: Falk releases slides for review in the portal (people by personal link, or Gemini on Vertex AI – two separate paths; fundus_review does the same; a Gemini check runs right away in the background and its findings arrive as feedback from 'Gemini'). When Falk says to look at / work in the feedback on the slides: fundus_feedback(project=…) returns the open points per slide (claims them for you), change and re-render the slides, then close EVERY point with fundus_feedback_resolve and a comment: incorporated (what changed), answered or rejected (why), or decision (Falk decides). Finally report what you incorporated, rejected and what is left for Falk. Independent checks (people, Gemini) verify sources and data points – never mark them verified yourself.
 Photos: Falk keeps an archive of his field-research photos (human-centred design: hospitals, factories, shops, homes, workshops, prototypes). Before searching the web or generating an image for a slide, look there with fundus_photo_search(question, purpose='external'|'teaching'|'internal') – only photos whose rights allow the purpose come back. Put a photo on a slide with the mck-exhibit helper mck_photo (photo(ref, purpose) + photo_img; its credit goes into the slide's sources); the render records the use. When Falk asks to add photos (files, folders, or the pictures in slide decks/PDFs), use fundus_photo_import with a survey (field study/source) and the context he gives; the local model keywords them in the background.
-Fundus Cloud: on Falk's explicit instruction, fundus_cloud(action='share', refs, recipients) sends slides end-to-end encrypted to another person's Fundus; internal slides need his confirmation after you show him the list (confirm_internal=true). Never connect or register – that needs his password and happens only in the portal (Verwaltung) or the terminal."""
+Fundus Cloud: on Falk's explicit instruction, fundus_cloud(action='share', refs, recipients) sends slides end-to-end encrypted to another person's Fundus; internal slides need his confirmation after you show him the list (confirm_internal=true). Never connect or register – that needs his password and happens only in the portal (Verwaltung) or the terminal.
+Hypotheses and findings (research registry): before stating a hypothesis or recording a finding, search with fundus_research_search. Record every hypothesis as soon as it is stated (fundus_hypothesis action='create'), pre-register it (action='prereg': statement, direction, measures, data, method, decision rule – then frozen) BEFORE any estimation or analysis; changes afterwards only as deviations (action='deviate'). Record every result – not supported and inconclusive count the same – (action='result') and its interpretation (action='interpret': summary, explanation, alternatives, limits, theory, relations, next). Exploratory results without a prior hypothesis are findings (fundus_finding); they never become confirmed, a hypothesis can be derived from them. Everything is internal unless Falk asks to publish it. Portal: {PORTAL}#forschung."""
 
 # ---------------------------------------------------------------- store access
 _db_path = os.environ.get("FUNDUS_DB") or str(DEFAULT_DB)
@@ -801,16 +803,41 @@ def dataset_add(st: Store, paths: list[str], title: str | None = None, descripti
                 note: str | None = None, keywords: list[str] | None = None, frequency: str | None = None,
                 next_expected: str | None = None, update_hint: str | None = None, kind: str | None = None,
                 crosswalk: dict | None = None, code_systems: dict | None = None, inputs: list | None = None,
-                table_scope: str | None = None) -> Any:
+                table_scope: str | None = None, reference: bool = False, retrieved_at: str | None = None,
+                script: str | None = None, text: bool = False, identifier: str | None = None, jurisdiction: str | None = None,
+                act_type: str | None = None, issuer: str | None = None, valid_from: str | None = None,
+                valid_to: str | None = None, version_label: str | None = None, published_at: str | None = None,
+                source_url: str | None = None) -> Any:
     from fundus import datasets
+    if reference:
+        from fundus import dataset_catalog as cat
+        ps = paths if isinstance(paths, list) else [paths]
+        if len(ps) != 1:
+            raise ValueError("reference=true registers ONE folder or file (its path); nothing is copied")
+        if dataset:
+            raise ValueError("a reference cannot be a new version of a dataset; register it as its own reference")
+        res = cat.add_reference(st, ps[0], title=title, description=description, source_title=source_title, publisher=publisher,
+                                url_=url, license=license, published=published, project=project, visibility=visibility,
+                                frequency=frequency, next_expected=next_expected, update_hint=update_hint, note=note,
+                                retrieved_at=retrieved_at, script=script, keywords=keywords, actor=ACTOR)
+        _photo_wake.set()
+        res["portal"] = f"{ex.PUBLIC_URL}/portal/#daten?d={res['slug']}"
+        res["description"] = ("queued: the local model describes it from README/Markdown files and the file listing only "
+                              "(never the data); the folder is checked nightly (fundus datasets locations)")
+        return res
     res = datasets.add(st, paths if isinstance(paths, list) else [paths], title=title, description=description,
                        source_title=source_title, publisher=publisher, url_=url, license=license, published=published,
                        project=project, visibility=visibility, dataset=dataset, note=note, keywords=keywords,
                        frequency=frequency, next_expected=next_expected, update_hint=update_hint, actor=ACTOR,
-                       kind=kind, crosswalk=crosswalk, code_systems=code_systems, inputs=inputs, table_scope=table_scope)
+                       kind=kind, crosswalk=crosswalk, code_systems=code_systems, inputs=inputs, table_scope=table_scope,
+                       retrieved_at=retrieved_at, script=script, text=text, identifier=identifier, jurisdiction=jurisdiction,
+                       act_type=act_type, issuer=issuer, valid_from=valid_from, valid_to=valid_to, version_label=version_label,
+                       published_at=published_at, source_url=source_url)
     _photo_wake.set()                         # the background worker describes it with the local model
     res["portal"] = f"{ex.PUBLIC_URL}/portal/#daten?d={res['slug']}"
-    res["description"] = "queued: the local model writes a summary, keywords and column meanings in the background (~10-60 s)"
+    res["description"] = ("queued: the local model describes the text from its metadata, beginning (title, preamble) and headings "
+                          "only – the text is not parsed or analysed" if res.get("text") else
+                          "queued: the local model writes a summary, keywords and column meanings in the background (~10-60 s)")
     return res
 
 
@@ -820,7 +847,12 @@ def fundus_dataset_add(paths: list[str], title: str | None = None, description: 
                        visibility: str = "public", dataset: str | None = None, note: str | None = None,
                        keywords: list[str] | None = None, frequency: str | None = None, next_expected: str | None = None,
                        update_hint: str | None = None, kind: str | None = None, crosswalk: dict | None = None,
-                       code_systems: dict | None = None, inputs: list | None = None, table_scope: str | None = None) -> str:
+                       code_systems: dict | None = None, inputs: list | None = None, table_scope: str | None = None,
+                       reference: bool = False, retrieved_at: str | None = None, script: str | None = None,
+                       text: bool = False, identifier: str | None = None, jurisdiction: str | None = None,
+                       act_type: str | None = None, issuer: str | None = None, valid_from: str | None = None,
+                       valid_to: str | None = None, version_label: str | None = None, published_at: str | None = None,
+                       source_url: str | None = None) -> str:
     """Store a dataset in Fundus – data files on the Spark: tables (CSV/TSV/TXT, Excel .xlsx – every sheet, JSON/JSONL,
     Parquet; also many GB) and accompanying documents (codebook, method: PDF, Markdown, Word). Each table gets a Parquet
     copy and a column profile; the local model (never a cloud model) then describes it. Give what you know: title,
@@ -838,34 +870,62 @@ def fundus_dataset_add(paths: list[str], title: str | None = None, description: 
     table holds several pairs). inputs ["dataset:12", {"ref": "dataset:7", "version": 2, "note": "…"}]: the datasets a derived
     dataset was built from – it is flagged stale when an input gets a newer version, and it becomes internal if an input is.
     table_scope='merged': the dataset shows the newest copy of every table across versions (a version may re-deliver only
-    some tables)."""
+    some tables). Provenance: retrieved_at (ISO date the data was obtained) and script (what fetched or built it) – both
+    go into the dataset's citation.
+    reference=true: raw data that stays where it is (huge dumps, folders of many files) – paths = ONE folder or file on the
+    Spark; nothing is copied, profiled or converted (no preview/query). It is searchable; the local model describes it from
+    README/Markdown files and the file listing only, never the data; the location is re-checked nightly.
+    Texts with versions (Texte mit Fassungen): laws, regulations, directives, guidelines, standards, terms of service and
+    AI-provider policies ALWAYS go in with text=True – act_type (law | regulation | directive | ordinance | guideline |
+    standard | terms | policy | other), identifier (ELI, CELEX, SR number or URL), jurisdiction (EU, CH, DE, US …), issuer,
+    and per version valid_from (ISO date, required), valid_to (last day; empty = still valid), version_label (e.g.
+    'konsolidierte Fassung vom 27.07.2026'), published_at, source_url. The files (PDF, HTML, XHTML, XML) are stored as
+    delivered, never converted into tables. A newer version: same call with dataset=<ref> – earlier open versions then end
+    the day before its valid_from (an explicit valid_to stays). Ingest only stores and describes: never split into articles,
+    diff or analyse a text at ingest (that is a later analysis with its own derived dataset). Texts are tracked with
+    frequency 'irregular' (set by default) – put where new consolidated versions appear into update_hint (EUR-Lex,
+    Fedlex, gesetze-im-internet.de …)."""
     return _run_own(dataset_add, paths, title=title, description=description, source_title=source_title, publisher=publisher,
                     url=url, license=license, published=published, project=project, visibility=visibility, dataset=dataset,
                     note=note, keywords=keywords, frequency=frequency, next_expected=next_expected, update_hint=update_hint,
-                    kind=kind, crosswalk=crosswalk, code_systems=code_systems, inputs=inputs, table_scope=table_scope)
+                    kind=kind, crosswalk=crosswalk, code_systems=code_systems, inputs=inputs, table_scope=table_scope,
+                    reference=reference, retrieved_at=retrieved_at, script=script, text=text, identifier=identifier,
+                    jurisdiction=jurisdiction, act_type=act_type, issuer=issuer, valid_from=valid_from, valid_to=valid_to,
+                    version_label=version_label, published_at=published_at, source_url=source_url)
 
 
 def fundus_dataset_search(question: str = "", project: str | None = None, include_internal: bool = False,
                           limit: int = 20, kind: str | None = None, code_system: str | None = None,
-                          stale: bool = False, ai: bool = False) -> str:
+                          stale: bool = False, ai: bool = False, lifecycle: str | None = None,
+                          jurisdiction: str | None = None, act_type: str | None = None) -> str:
     """Find datasets in Fundus before an analysis – BEFORE downloading data elsewhere. question: what the data should
     contain (words matched against titles, descriptions, keywords, column names and their meanings, code systems, source,
-    project; empty = all). kind: 'data' | 'crosswalk'. code_system: only datasets with a column in that system (e.g.
+    project, for texts also identifier, issuer and version labels; empty = all). kind: 'data' | 'crosswalk' | 'text'
+    (texts with versions: laws, regulations, guidelines, standards, terms, policies); jurisdiction ('EU', 'CH' …) and
+    act_type narrow to texts. code_system: only datasets with a column in that system (e.g.
     'NAICS-2022') or crosswalks from/to it. stale=true: derived datasets whose inputs have newer versions. Internal datasets
-    only with include_internal=true or their project. Hits: ref, title, summary, rows, columns, period, geo, source. Then
-    fundus_dataset(ref) for the columns and file paths.
+    only with include_internal=true or their project. Hits: ref, title, summary, rows, columns (of the main table), period,
+    geo, source. Then fundus_dataset(ref) for the columns and file paths. Withdrawn datasets are left out (lifecycle='all'
+    shows them); a superseded one carries lifecycle 'superseded' and successor (the ref to use instead); holding
+    'reference' = raw data at a path outside Fundus (no query/preview).
     ai=true: a free-text question about the stock ("Haben wir Jobpostings zum Marketing?") answered by the LOCAL model
     (gemma4 on the Spark) from the dataset descriptions only, not the data – takes about 1–2 minutes. Returns answer
     (ja | teilweise | nein), summary, hits (fit direkt | teilweise, why, columns) and related datasets; check a hit with
     fundus_dataset(ref) before using it (descriptions can be wrong)."""
-    from fundus import datasets
+    from fundus import datasets, dataset_catalog as cat
     if ai:
         from fundus import dataset_ask
         return _run_own(lambda st: dataset_ask.ask(st, question, include_internal=include_internal, project=project,
-                                                   visible_project=project))
-    return _run(lambda st: datasets.search(st, question, project=project, include_internal=include_internal,
-                                           limit=min(int(limit or 20), 100), visible_project=project, kind=kind,
-                                           code_system=code_system, stale=stale))
+                                                   visible_project=project, actor=ACTOR))
+
+    def run(st):
+        res = datasets.search(st, question, project=project, include_internal=include_internal, limit=min(int(limit or 20), 100),
+                              visible_project=project, kind=kind, code_system=code_system, stale=stale, lifecycle=lifecycle,
+                              jurisdiction=jurisdiction, act_type=act_type)
+        if question:
+            cat.log_uses(st, [x["id"] for x in res["datasets"][:5]], "search_hit", actor=ACTOR, project=project)
+        return res
+    return _run(run)
 
 
 def fundus_crosswalk(system_from: str | None = None, system_to: str | None = None, codes: list[str] | str | None = None,
@@ -891,28 +951,47 @@ def fundus_crosswalk(system_from: str | None = None, system_to: str | None = Non
 
 def dataset_one(st: Store, ref: str, action: str = "get", sql: str | None = None, table: str | None = None,
                 offset: int = 0, limit: int = 50, project: str | None = None, include_internal: bool = False,
-                changes: dict | None = None) -> Any:
-    from fundus import datasets
+                changes: dict | None = None, at: str | None = None, version: int | None = None) -> Any:
+    from fundus import datasets, dataset_catalog as cat, dataset_texts as tx
     d = datasets.get(st, ref, include_internal=include_internal, project=project)
+    log = lambda tool, detail=None: cat.log_use(st, d["id"], tool, actor=ACTOR, project=project, detail=detail)
     if action == "get":
+        log("show")
         return d
     if action == "update":
         if not changes:
             raise ValueError(f"update needs changes, e.g. {{'frequency': 'annual', 'next_expected': '2027-09', 'update_hint': '…'}}; "
                              f"editable: {', '.join(sorted(datasets.EDITABLE))}")
-        return datasets.update(st, ref, changes, actor=ACTOR)
+        out = datasets.update(st, ref, changes, actor=ACTOR)
+        log("update", sorted(changes))
+        return out
     if action == "preview":
-        return datasets.preview(st, ref, table=table, offset=offset, limit=limit)
+        out = datasets.preview(st, ref, table=table, offset=offset, limit=limit)
+        log("preview", {"table": out.get("table"), "offset": offset})
+        return out
     if action == "query":
         if not sql:
             raise ValueError("query needs sql (SELECT … FROM <table view> – see views in the answer, the first table is also t)")
-        return datasets.query(st, ref, sql, limit=limit or 500)
-    raise ValueError("action: get | preview | query | update")
+        out = datasets.query(st, ref, sql, limit=limit or 500)
+        log("query", sql[:300])
+        return out
+    if action == "at":
+        if not at:
+            raise ValueError("at needs at='YYYY-MM-DD'")
+        log("show", {"at": at})
+        return tx.version_at(st, ref, at, include_internal=include_internal, project=project)
+    if action == "version":
+        if version is None or not changes:
+            raise ValueError(f"version needs version=N and changes {{{', '.join(tx.VERSION_FIELDS)}}}")
+        out = tx.set_version(st, ref, int(version), changes, actor=ACTOR)
+        log("update", {"version": version, "fields": sorted(changes)})
+        return out
+    raise ValueError("action: get | preview | query | update | at | version")
 
 
 def fundus_dataset(ref: str, action: str = "get", sql: str | None = None, table: str | None = None, offset: int = 0,
                    limit: int = 50, project: str | None = None, include_internal: bool = False,
-                   changes: dict | None = None) -> str:
+                   changes: dict | None = None, at: str | None = None, version: int | None = None) -> str:
     """One dataset. action='get': description, source, tables with every column (type, nulls, distinct, min/max, mean,
     examples, meaning) and the local file paths – on the Spark load a table directly for an analysis:
     pandas.read_parquet(path) or duckdb.sql("SELECT … FROM read_parquet('path')"). action='preview': rows of a table
@@ -920,11 +999,254 @@ def fundus_dataset(ref: str, action: str = "get", sql: str | None = None, table:
     after the table, the first also `t`; at most 2000 rows, 60 s. action='update' with changes {field: value}: description,
     source fields, project, visibility, keywords, tags and the edition cadence (frequency, next_expected, update_hint,
     last_checked); linked data: code_systems {"column": "NAICS-2022"} (merged, null removes one), kind + crosswalk {…},
-    inputs [refs] (lineage), table_scope 'version' | 'merged'. Publishing a dataset built from internal inputs needs
-    confirm_public=true. get also shows inputs (stale when an input has a newer version), used_by and each column's
-    code_system. Internal datasets need include_internal or project."""
+    inputs [refs] (lineage), table_scope 'version' | 'merged'; lifecycle 'active' | 'superseded' (with superseded_by =
+    the successor ref) | 'withdrawn' (+ lifecycle_note); provenance retrieved_at (ISO date), script. Publishing a dataset
+    built from internal inputs needs confirm_public=true. get also shows inputs (stale when an input has a newer
+    version), used_by, each column's code_system, citation (+ citation_bibtex: cite the dataset with it), lineage, uses
+    and version changes; a superseded/withdrawn/reference dataset starts with a `notice` – read it. Reference datasets
+    (holding 'reference') have no preview/query: their files lie at location.path. Internal datasets need
+    include_internal or project. Every call is logged as a use of the dataset (usage statistics).
+    Texts with versions (kind 'text': identifier, jurisdiction, act_type, issuer, in_force): versions[] carry valid_from,
+    valid_to, version_label, published_at, source_url, in_force and the files of each version. action='at' with
+    at='YYYY-MM-DD': the version valid at that date (from the stored validity; the text is not read). action='version'
+    with version=N and changes {valid_from, valid_to, version_label, published_at, source_url}: correct a version's
+    validity or label. update also takes identifier, jurisdiction, act_type, issuer."""
     return _run_own(dataset_one, ref, action=action, sql=sql, table=table, offset=offset, limit=limit, project=project,
-                    include_internal=include_internal, changes=changes)        # own connection: a long query must not block the other tools
+                    include_internal=include_internal, changes=changes, at=at, version=version)        # own connection: a long query must not block the other tools
+
+
+# ---------------------------------------------------------------- research registry (fundus/research.py)
+def hypothesis_tool(st: Store, action: str = "get", ref: str | None = None, series: str | None = None,
+                    statement: str | None = None, code: str | None = None, kind: str | None = None, title: str | None = None,
+                    direction: str | None = None, theory_refs: list[str] | None = None, project: str | None = None,
+                    tags: dict | None = None, visibility: str | None = None, prereg: dict | None = None,
+                    field: str | None = None, before: str | None = None, after: str | None = None,
+                    reason: str | None = None, timing: str | None = None, result: dict | None = None,
+                    interpretation: dict | None = None, result_id: int | None = None, to: str | None = None,
+                    relation: str | None = None, note: str | None = None, changes: dict | None = None) -> Any:
+    from fundus import research as rs
+    a = (action or "get").lower()
+    if a == "create":
+        return rs.create_hypothesis(st, statement or "", code=code, series=series, kind=kind or "quantitative", title=title,
+                                    direction=direction, theory_refs=theory_refs, project=project, tags=tags,
+                                    visibility=visibility or "internal", prereg=prereg, actor=ACTOR)
+    if not ref:
+        raise ValueError(f"action '{a}' needs ref (hypothesis:N or the code, e.g. H8.1)")
+    if a == "get":
+        return rs.get_hypothesis(st, ref, series=series)     # research is internal by default: sessions see it
+    if a == "prereg":
+        return rs.preregister(st, ref, prereg or {}, actor=ACTOR, series=series)
+    if a == "draft":
+        rs.save_prereg_draft(st, rs.hyp_row(st, ref, series)["id"], prereg or {})
+        return rs.get_hypothesis(st, ref, series=series)
+    if a == "start":
+        return rs.start(st, rs.hyp_row(st, ref, series)["id"], actor=ACTOR)
+    if a == "deviate":
+        return rs.add_deviation(st, rs.hyp_row(st, ref, series)["id"], field or "", after, reason or "", timing or "",
+                                before=before, actor=ACTOR)
+    if a == "result":
+        r = dict(result or {})
+        if "verdict" not in r:
+            raise ValueError("result needs {verdict: supported | partly_supported | not_supported | inconclusive, effect, "
+                             "estimate, ci_low, ci_high, n, robustness, caveats, method_doc, scripts, inputs, outputs, …}")
+        return rs.add_result(st, rs.hyp_row(st, ref, series)["id"], r.pop("verdict"), actor=ACTOR,
+                             interpretation=interpretation, **r)
+    if a == "interpret":
+        h = rs.hyp_row(st, ref, series)
+        rid = result_id or (rs._current_result(st, h["id"]) or {"id": None})["id"]
+        if not rid:
+            raise ValueError(f"{h['code']} has no result yet – record the result first (action='result')")
+        out = rs.set_interpretation(st, "result", rid, interpretation or {}, author=ACTOR)
+        return {**out, "hypothesis": rs.get_hypothesis(st, h["id"])["interpretation_state"]}
+    if a == "withdraw":
+        return rs.withdraw(st, "hypothesis", rs.hyp_row(st, ref, series)["id"], reason or "", actor=ACTOR)
+    if a == "revise":
+        kw = {k: v for k, v in {"title": title, "kind": kind, "direction": direction, "theory_refs": theory_refs,
+                                "tags": tags, "prereg": prereg}.items() if v is not None}
+        return rs.revise(st, rs.hyp_row(st, ref, series)["id"], statement=statement, reason=reason, actor=ACTOR, **kw)
+    if a == "link":
+        if not to or not relation:
+            raise ValueError("link needs to (hypothesis:N | finding:N | code) and relation (sharpens | replicates | contradicts | "
+                             "extends | derived_from | competes_with)")
+        return rs.link(st, f"hypothesis:{rs.hyp_row(st, ref, series)['id']}", to, relation, note=note, actor=ACTOR)
+    if a == "derive":                        # a follow-up hypothesis derived from this one's result (linked 'extends')
+        h = rs.hyp_row(st, ref, series)
+        new = rs.create_hypothesis(st, statement or "", series=series or h["series_id"], kind=kind or h["kind"], title=title,
+                                   direction=direction, theory_refs=theory_refs or rs._l(h["theory_refs"]),
+                                   project=project or h["project"], tags=tags, prereg=prereg, actor=ACTOR)
+        rs.link(st, new["ref"], f"hypothesis:{h['id']}", relation or "extends", note=note, actor=ACTOR)
+        return rs.get_hypothesis(st, new["id"])
+    if a == "update":
+        return rs.update_hypothesis(st, rs.hyp_row(st, ref, series)["id"], changes or {}, actor=ACTOR)
+    raise ValueError("action: create | prereg | draft | start | deviate | result | interpret | withdraw | revise | link | derive | "
+                     "update | get")
+
+
+def fundus_hypothesis(action: str = "get", ref: str | None = None, series: str | None = None, statement: str | None = None,
+                      code: str | None = None, kind: str | None = None, title: str | None = None, direction: str | None = None,
+                      theory_refs: list[str] | None = None, project: str | None = None, tags: dict[str, Any] | None = None,
+                      visibility: str | None = None, prereg: dict[str, Any] | None = None, field: str | None = None,
+                      before: str | None = None, after: str | None = None, reason: str | None = None,
+                      timing: str | None = None, result: dict[str, Any] | None = None,
+                      interpretation: dict[str, Any] | None = None, result_id: int | None = None, to: str | None = None,
+                      relation: str | None = None, note: str | None = None, changes: dict[str, Any] | None = None) -> str:
+    """Hypotheses in the research registry – strictly pre-registered. Search first with fundus_research_search.
+    action='create': record a hypothesis AS SOON AS it is stated: statement (falsifiable), series ('serie-8', optional),
+      code (default H<series>.<n>), kind quantitative | qualitative | mixed, title, direction + | − | ≠ | none, theory_refs
+      (theory card ids of the series, e.g. ['T1']), project, tags (fundus_vocab), prereg (draft fields, not yet frozen).
+      Visibility is internal unless Falk asks to publish.
+    action='prereg' (ref): FREEZE the pre-registration BEFORE any estimation or analysis – prereg={statement, direction,
+      unit, sample, measures (operationalisation), data ([{ref: 'dataset:N', version}] or the material for qualitative
+      work), method (model/estimator; qualitative: sampling, coding frame), controls, decision_rule ('supported if …, not
+      supported if …, else inconclusive'; qualitative: what would support/contradict), robustness_plan, extra}. Refused
+      when statement, direction, measures, data, method or decision_rule is missing. Afterwards timestamp + sha256; nothing
+      of it can change. action='draft' saves prereg fields without freezing.
+    action='start': analysis running. action='deviate': field, after, reason, timing before_analysis | after_data_seen
+      (append-only; before defaults to the current value) – the only way to change a frozen plan.
+    action='result': result={verdict supported | partly_supported | not_supported | inconclusive, effect (text), estimate,
+      ci_low, ci_high, unit, n, robustness, caveats, method_doc (markdown: model equation, specification, estimation,
+      diagnostics), scripts [paths – sha256 added], inputs ['dataset:N' (version added)], outputs ['exhibit:N',
+      'dataset:N'], measures {…}, sample_run}; optional interpretation. A rerun adds a new version. Record EVERY result,
+      also not supported and inconclusive.
+    action='interpret': interpretation={summary (what the result says), explanation (why it came out so), alternatives,
+      limits (identification, data, measurement), theory (meaning for the theory), relations (to other hypotheses/findings),
+      next (follow-up hypotheses)} for the current result (or result_id); complete = summary + explanation + limits +
+      theory. Written by you/Falk, never by a local model.
+    action='withdraw' (reason) · 'revise' (statement, reason: new hypothesis <code>-r2, the old one stays, linked
+      'revises') · 'link' (to: hypothesis:N | finding:N | code, relation sharpens | replicates | contradicts | extends |
+      derived_from | competes_with) · 'derive' (statement: a follow-up hypothesis, linked 'extends') · 'update'
+      (changes: title, tags, theory_refs, project, published_in, visibility; statement/direction/kind only before the
+      freeze) · 'get' (everything: prereg with deviations, results, interpretation, evidence, links, integrity flags,
+      lineage, history).
+    ref: hypothesis:N or the code (H8.1; pass series when a code is ambiguous)."""
+    return _run(hypothesis_tool, action=action, ref=ref, series=series, statement=statement, code=code, kind=kind, title=title,
+                direction=direction, theory_refs=theory_refs, project=project, tags=tags, visibility=visibility, prereg=prereg,
+                field=field, before=before, after=after, reason=reason, timing=timing, result=result,
+                interpretation=interpretation, result_id=result_id, to=to, relation=relation, note=note, changes=changes)
+
+
+def finding_tool(st: Store, action: str = "get", ref: str | None = None, series: str | None = None,
+                 statement: str | None = None, code: str | None = None, kind: str | None = None, title: str | None = None,
+                 strength: str | None = None, context: dict | None = None, method: str | None = None,
+                 theory_refs: list[str] | None = None, project: str | None = None, tags: dict | None = None,
+                 visibility: str | None = None, evidence: list[dict] | None = None, interpretation: dict | None = None,
+                 to: str | None = None, relation: str | None = None, note: str | None = None, reason: str | None = None,
+                 hypothesis: dict | None = None, changes: dict | None = None) -> Any:
+    from fundus import research as rs
+    a = (action or "get").lower()
+    if a == "create":
+        return rs.create_finding(st, statement or "", code=code, series=series, kind=kind or "qualitative", title=title,
+                                 strength=strength, context=context, method=method, theory_refs=theory_refs, project=project,
+                                 tags=tags, visibility=visibility or "internal", evidence=evidence, actor=ACTOR)
+    if not ref:
+        raise ValueError(f"action '{a}' needs ref (finding:N or the code, e.g. F8.1)")
+    f = rs.finding_row(st, ref, series)
+    if a == "get":
+        return rs.get_finding(st, f["id"])
+    if a == "evidence":
+        if not evidence:
+            raise ValueError("evidence=[{kind: dataset | observation | document | exhibit | photo | video | quote | note | file, "
+                             "ref, version, quote, speaker_role (role only, never a private person's name), note}]")
+        out = [rs.add_evidence(st, f"finding:{f['id']}", actor=ACTOR, **e) for e in evidence]
+        return {"added": out, "finding": rs.get_finding(st, f["id"])["evidence"]}
+    if a == "interpret":
+        return rs.set_interpretation(st, "finding", f["id"], interpretation or {}, author=ACTOR)
+    if a == "link":
+        if not to or not relation:
+            raise ValueError("link needs to and relation")
+        return rs.link(st, f"finding:{f['id']}", to, relation, note=note, actor=ACTOR)
+    if a in ("derive_hypothesis", "derive"):
+        hy = dict(hypothesis or {})
+        stmt = hy.pop("statement", None) or statement
+        if not stmt:
+            raise ValueError("derive_hypothesis needs statement (or hypothesis={statement, title, direction, kind, prereg, …})")
+        return rs.derive_hypothesis(st, f["id"], stmt, actor=ACTOR, **hy)
+    if a == "withdraw":
+        return rs.withdraw(st, "finding", f["id"], reason or "", actor=ACTOR)
+    if a == "update":
+        return rs.update_finding(st, f["id"], changes or {}, actor=ACTOR)
+    raise ValueError("action: create | evidence | interpret | link | derive_hypothesis | withdraw | update | get")
+
+
+def fundus_finding(action: str = "get", ref: str | None = None, series: str | None = None, statement: str | None = None,
+                   code: str | None = None, kind: str | None = None, title: str | None = None, strength: str | None = None,
+                   context: dict[str, Any] | None = None, method: str | None = None, theory_refs: list[str] | None = None,
+                   project: str | None = None, tags: dict[str, Any] | None = None, visibility: str | None = None,
+                   evidence: list[dict[str, Any]] | None = None, interpretation: dict[str, Any] | None = None,
+                   to: str | None = None, relation: str | None = None, note: str | None = None, reason: str | None = None,
+                   hypothesis: dict[str, Any] | None = None, changes: dict[str, Any] | None = None) -> str:
+    """Findings: exploratory results WITHOUT a prior hypothesis (interviews, observation, documents, photos/videos,
+    exploratory data analysis). Always exploratory – never relabelled as confirmed. Search first with fundus_research_search.
+    action='create': statement, series (optional), kind qualitative | quantitative | mixed, title, strength
+      single_observation | recurring_pattern | saturated | quantified, context {setting, sample, period}, method
+      (interviews, observation, coding, exploratory analysis …), theory_refs, project, tags, evidence (list as below).
+    action='evidence': evidence=[{kind dataset | observation | document | exhibit | photo | video | quote | note | file, ref
+      ('dataset:95', 'photo:12', 'observation:4871'), version, quote (verbatim), speaker_role (ROLE only, e.g.
+      'Pflegeleitung, Spital A' – never names of private persons), note}].
+    action='interpret': interpretation={summary, explanation, alternatives, limits, theory, relations, next} (complete =
+      summary + explanation + limits + theory; written by you/Falk, never by a local model).
+    action='link' (to, relation) · 'derive_hypothesis' (statement or hypothesis={statement, title, direction, kind,
+      prereg …}: a new hypothesis, status idea, kept as 'entstanden aus Finding F…'; pre-register it before testing) ·
+      'withdraw' (reason) · 'update' (changes) · 'get'. ref: finding:N or the code (F8.1)."""
+    return _run(finding_tool, action=action, ref=ref, series=series, statement=statement, code=code, kind=kind, title=title,
+                strength=strength, context=context, method=method, theory_refs=theory_refs, project=project, tags=tags,
+                visibility=visibility, evidence=evidence, interpretation=interpretation, to=to, relation=relation, note=note,
+                reason=reason, hypothesis=hypothesis, changes=changes)
+
+
+def fundus_research_search(question: str = "", series: str | None = None, kind: str | None = None, status: str | None = None,
+                           verdict: str | None = None, theory: str | None = None, dataset: str | None = None,
+                           project: str | None = None, include_internal: bool = True, exploratory: bool | None = None,
+                           type: str | None = None, flag: str | None = None, limit: int = 30) -> str:
+    """Search hypotheses and findings BEFORE stating a new hypothesis or recording a finding. Full text over statements,
+    pre-registrations, results, interpretations, theory cards/scholars and findings. Filters: series ('serie-8'), kind
+    (quantitative | qualitative | mixed), status (idea | preregistered | running | result | revised | withdrawn; findings:
+    draft | recorded …), verdict (supported | partly_supported | not_supported | inconclusive), theory (card id or name,
+    scholar), dataset ('dataset:47'), project, type ('hypothesis' | 'finding'), exploratory (true = findings only), flag
+    (interpretation_missing | data_newer_than_result | prereg_after_result …). Ranking is by text relevance only: rejected
+    and inconclusive results are never ranked down. Without question and filters: everything (limit). Hits are briefs –
+    open one with fundus_hypothesis(action='get', ref) / fundus_finding(action='get', ref)."""
+    from fundus import research as rs
+    return _run(lambda st: rs.search(st, question, series=series, kind=kind, status=status, verdict=verdict, theory=theory,
+                                     dataset=dataset, project=project, include_internal=include_internal,
+                                     exploratory=exploratory, type=type, flag=flag, limit=min(int(limit or 30), 200)))
+
+
+def research_series_tool(st: Store, action: str = "list", ref: str | None = None, slug: str | None = None,
+                         title: str | None = None, programme: str | None = None, project: str | None = None,
+                         summary: str | None = None, proposal_path: str | None = None, theory_cards: list | None = None,
+                         changes: dict | None = None) -> Any:
+    from fundus import research as rs
+    a = (action or "list").lower()
+    if a == "list":
+        return {"series": rs.series_list(st), "worklist": rs.worklist(st, limit=20)["counts"], "stats": rs.stats(st)}
+    if a == "create":
+        return rs.create_series(st, slug or title or "", title or "", programme=programme, project=project, summary=summary,
+                                proposal_path=proposal_path, theory_cards=theory_cards, actor=ACTOR)
+    if not (ref or slug):
+        raise ValueError(f"action '{a}' needs ref (slug, e.g. serie-8)")
+    if a == "get":
+        return rs.series_get(st, ref or slug)
+    if a == "update":
+        ch = dict(changes or {})
+        for k, v in {"title": title, "programme": programme, "project": project, "summary": summary,
+                     "proposal_path": proposal_path, "theory_cards": theory_cards}.items():
+            if v is not None:
+                ch[k] = v
+        return rs.update_series(st, ref or slug, ch, actor=ACTOR)
+    raise ValueError("action: list | get | create | update")
+
+
+def fundus_research_series(action: str = "list", ref: str | None = None, slug: str | None = None, title: str | None = None,
+                           programme: str | None = None, project: str | None = None, summary: str | None = None,
+                           proposal_path: str | None = None, theory_cards: list[dict[str, Any]] | None = None,
+                           changes: dict[str, Any] | None = None) -> str:
+    """Research series/programmes (e.g. 'serie-8'). action='list': all series with status and verdict counts + the work
+    list counts. 'get' (ref): the series with its theory cards, hypotheses and findings. 'create': slug, title, programme,
+    project, summary, proposal_path, theory_cards [{id: 'T1', name, claim, scholars [{name, works [{title, doi}]}]}]
+    (internal by default). 'update' (ref + fields or changes)."""
+    return _run(research_series_tool, action=action, ref=ref, slug=slug, title=title, programme=programme, project=project,
+                summary=summary, proposal_path=proposal_path, theory_cards=theory_cards, changes=changes)
 
 
 def exhibit_move(st: Store, target: str, refs: list[str], to: str, project: str | None = None) -> Any:
@@ -1355,7 +1677,8 @@ TOOLS = [fundus_search, fundus_get, fundus_entity, fundus_series, fundus_find_se
          fundus_update, fundus_vocab, fundus_add_vocab, fundus_exhibit, fundus_exhibit_add, fundus_exhibit_set,
          fundus_exhibit_deck, fundus_exhibit_link, fundus_exhibit_lock, fundus_exhibit_copy, fundus_exhibit_trash, fundus_exhibit_move, fundus_exhibit_archive, fundus_exhibit_favorite, fundus_review, fundus_feedback, fundus_feedback_resolve,
          fundus_slide_search, fundus_slides, fundus_saved_search, fundus_photo_search, fundus_photo, fundus_photo_import,
-         fundus_dataset_add, fundus_dataset_search, fundus_dataset, fundus_crosswalk, fundus_cloud]
+         fundus_dataset_add, fundus_dataset_search, fundus_dataset, fundus_crosswalk, fundus_cloud,
+         fundus_hypothesis, fundus_finding, fundus_research_search, fundus_research_series]
 
 
 def record_usage(tool: str) -> None:
@@ -1591,17 +1914,30 @@ async def portal_settings(request):
 
 
 def _api_call(request, fn, *a, **kw):
-    """Run a portal API call under the store lock and map errors to HTTP status codes."""
+    """Run a portal API call under the store lock and map errors to HTTP status codes. A write that collides with another
+    process (CLI import, session) gets 'database is locked' at once in WAL mode even with a busy timeout – it is rolled back
+    and retried twice before the portal sees an error (3 Nov 2026: emptying the trash failed while a dataset was added)."""
     try:
-        with _lock:
-            data = fn(_store(), *a, **kw)
+        for attempt in range(3):
+            try:
+                with _lock:
+                    data = fn(_store(), *a, **kw)
+                break
+            except sqlite3.OperationalError as e:
+                if "locked" not in str(e).lower() or attempt == 2:
+                    raise
+                _store().db.rollback()
+                print(f"fundus: {request.url.path} retry after '{e}'", file=sys.stderr, flush=True)
+                time.sleep(1.5 * (attempt + 1))
     except PermissionError as e:
         return _api_response(request, {"error": str(e)}, 403)
     except LookupError as e:
         return _api_response(request, {"error": str(e.args[0]) if e.args else "not found"}, 404)
     except (ValueError, TypeError, sqlite3.Error) as e:
         _store().db.rollback()
-        return _api_response(request, {"error": str(e.args[0]) if e.args else str(e)}, 400)
+        msg = str(e.args[0]) if e.args else str(e)
+        print(f"fundus: {request.method} {request.url.path} → 400: {type(e).__name__}: {msg[:300]}", file=sys.stderr, flush=True)
+        return _api_response(request, {"error": msg}, 400)
     return _api_response(request, data)
 
 
@@ -2126,8 +2462,35 @@ def _own_call(request, fn, *a, **kw):
         st.close()
 
 
+def _portal_reference(st: Store, body: dict) -> Any:
+    """POST /api/datasets/reference: register a folder/file on the Spark by path – it must exist and lie under the home
+    directory of the user running Fundus (no other paths from a browser)."""
+    from fundus import dataset_catalog as cat
+    raw = str(body.get("path") or "").strip()
+    if not raw:
+        raise ValueError("Pfad fehlt: ein Ordner oder eine Datei auf der Spark")
+    p = Path(raw).expanduser()
+    if not p.is_absolute():
+        raise ValueError("Bitte einen absoluten Pfad auf der Spark angeben, z. B. /home/…/Downloads/dump")
+    p = p.resolve()
+    home = Path.home().resolve()
+    if p == home or home not in p.parents:
+        raise ValueError(f"Der Pfad muss unterhalb von {home} liegen")
+    if not p.exists():
+        raise ValueError(f"Nicht gefunden: {p}")
+    fields = {k: (str(body[k]).strip() or None) if body.get(k) not in (None, "") else None
+              for k in ("title", "description", "source_title", "publisher", "license", "published", "project", "frequency",
+                        "next_expected", "update_hint", "note", "retrieved_at", "script")}
+    res = cat.add_reference(st, p, url_=(str(body.get("url") or "").strip() or None), visibility=body.get("visibility") or "public",
+                            actor="portal", **fields)
+    _photo_wake.set()
+    return res
+
+
 async def datasets_api(request):
-    """GET /api/datasets?q=&project=&removed=1 – list/search (portal: all, internal included). POST /api/datasets/ask
+    """GET /api/datasets?q=&project=&removed=1 – list/search (portal: all, internal included). GET /api/datasets/catalog
+    ?removed=0|1 – the catalog {stats, facets, datasets} (fundus.dataset_catalog). POST /api/datasets/reference {path,
+    title, …} – register a folder/file under the home directory as a reference dataset. POST /api/datasets/ask
     {question, project} – free-text question answered by the local model (fundus.dataset_ask). GET /api/datasets/<id> –
     detail. POST /api/datasets/<id> {action: update (changes) | remove | restore | redescribe}.
     GET /api/datasets/<id>/preview?table=&offset=&limit=&order=col:desc. POST /api/datasets/<id>/query {sql}."""
@@ -2141,7 +2504,15 @@ async def datasets_api(request):
             return err
         from fundus import dataset_ask
         return await run_in_threadpool(_own_call, request, lambda st: dataset_ask.ask(
-            st, body.get("question") or "", include_internal=True, project=body.get("project") or None))
+            st, body.get("question") or "", include_internal=True, project=body.get("project") or None, actor="portal"))
+    if did is None and request.url.path.rstrip("/").endswith("/catalog"):
+        from fundus import dataset_catalog as cat
+        return await run_in_threadpool(_own_call, request, lambda st: cat.catalog(st, removed=qp.get("removed") == "1"))
+    if did is None and request.method == "POST" and request.url.path.rstrip("/").endswith("/reference"):
+        body, err = await _json_body(request)
+        if err:
+            return err
+        return _api_call(request, lambda st: _portal_reference(st, body))
     if did is None and qp.get("ref"):
         return _api_call(request, datasets.get, qp.get("ref"))
     if did is None:
@@ -2149,17 +2520,26 @@ async def datasets_api(request):
                                                                  include_internal=True, removed=qp.get("removed") == "1",
                                                                  limit=min(int(qp.get("limit") or 200), 500)),
                                                "stats": datasets.stats(st)})
+    from fundus import dataset_catalog as cat
+
+    def logged(fn, tool, detail=None):
+        def run(st):
+            out = fn(st)
+            cat.log_use(st, did, tool, actor="portal", detail=detail)
+            return out
+        return run
     if sub == "preview":
-        return await run_in_threadpool(_own_call, request, lambda st: datasets.preview(
+        return await run_in_threadpool(_own_call, request, logged(lambda st: datasets.preview(
             st, did, table=qp.get("table") or None, offset=int(qp.get("offset") or 0), limit=int(qp.get("limit") or 100),
-            order=qp.get("order") or None))
+            order=qp.get("order") or None), "preview", {"table": qp.get("table"), "offset": qp.get("offset")}))
     if request.method == "GET":
-        return _api_call(request, datasets.get, did)
+        return _api_call(request, logged(lambda st: datasets.get(st, did), "portal_view"))
     body, err = await _json_body(request)
     if err:
         return err
     if sub == "query":
-        return await run_in_threadpool(_own_call, request, lambda st: datasets.query(st, did, body.get("sql") or "", limit=500))
+        return await run_in_threadpool(_own_call, request, logged(lambda st: datasets.query(st, did, body.get("sql") or "", limit=500),
+                                                                  "query", (body.get("sql") or "")[:300]))
     a = body.get("action")
     if a == "update":
         return _api_call(request, lambda st: datasets.update(st, did, body.get("changes") or {}, actor="portal"))
@@ -2173,6 +2553,129 @@ async def datasets_api(request):
         _photo_wake.set()
         return r
     return _api_response(request, {"error": "action: update | remove | restore | redescribe"}, 400)
+
+
+def _research_post(st: Store, sub: str, rid, body: dict) -> Any:
+    """Portal writes in the research registry (actor 'portal'). Never edits a frozen pre-registration: changes are deviations."""
+    from fundus import research as rs
+    a = (body.get("action") or ("create" if rid is None else "")).lower()
+    who = "portal"
+    author = (body.get("author") or "Falk (Portal)").strip()
+    if sub == "series":
+        if rid is None:
+            return rs.create_series(st, body.get("slug") or body.get("title") or "", body.get("title") or "",
+                                    programme=body.get("programme"), project=body.get("project"), summary=body.get("summary"),
+                                    theory_cards=body.get("theory_cards"), actor=who)
+        return rs.update_series(st, rid, body.get("changes") or {}, actor=who)
+    if sub == "hypotheses":
+        if rid is None:
+            if a != "create":
+                raise ValueError("POST /api/research/hypotheses creates a hypothesis (statement, series, …)")
+            return rs.create_hypothesis(st, body.get("statement") or "", code=body.get("code"), series=body.get("series"),
+                                        kind=body.get("kind") or "quantitative", title=body.get("title"),
+                                        direction=body.get("direction"), theory_refs=body.get("theory_refs"),
+                                        project=body.get("project"), tags=body.get("tags"), prereg=body.get("prereg"), actor=who)
+        hid = rs.hyp_row(st, rid)["id"]
+        if a == "prereg":
+            return rs.preregister(st, hid, body.get("prereg") or {}, actor=who)
+        if a == "draft":
+            rs.save_prereg_draft(st, hid, body.get("prereg") or {})
+            return rs.get_hypothesis(st, hid)
+        if a == "start":
+            return rs.start(st, hid, actor=who)
+        if a == "deviate":
+            return rs.add_deviation(st, hid, body.get("field") or "", body.get("after"), body.get("reason") or "",
+                                    body.get("timing") or "", before=body.get("before"), actor=author)
+        if a == "result":
+            r = dict(body.get("result") or {})
+            return rs.add_result(st, hid, r.pop("verdict", None), actor=author, **r)
+        if a == "interpret":
+            res = body.get("result_id") or (rs._current_result(st, hid) or {"id": None})["id"]
+            if not res:
+                raise ValueError("no result to interpret yet")
+            rs.set_interpretation(st, "result", res, body.get("interpretation") or {}, author=author)
+            return rs.get_hypothesis(st, hid)
+        if a == "link":
+            rs.link(st, f"hypothesis:{hid}", body.get("to") or "", body.get("relation") or "", note=body.get("note"), actor=who)
+            return rs.get_hypothesis(st, hid)
+        if a == "withdraw":
+            return rs.withdraw(st, "hypothesis", hid, body.get("reason") or "", actor=who)
+        if a == "revise":
+            return rs.revise(st, hid, statement=body.get("statement"), reason=body.get("reason"), actor=who)
+        if a == "update":
+            return rs.update_hypothesis(st, hid, body.get("changes") or {}, actor=who)
+        raise ValueError("action: prereg | draft | start | deviate | result | interpret | link | withdraw | revise | update")
+    if sub == "findings":
+        if rid is None:
+            return rs.create_finding(st, body.get("statement") or "", code=body.get("code"), series=body.get("series"),
+                                     kind=body.get("kind") or "qualitative", title=body.get("title"),
+                                     strength=body.get("strength"), context=body.get("context"), method=body.get("method"),
+                                     theory_refs=body.get("theory_refs"), project=body.get("project"), tags=body.get("tags"),
+                                     evidence=body.get("evidence"), actor=who)
+        fid = rs.finding_row(st, rid)["id"]
+        if a == "evidence":
+            for e in body.get("evidence") or ([body["item"]] if body.get("item") else []):
+                rs.add_evidence(st, f"finding:{fid}", actor=who, **e)
+            return rs.get_finding(st, fid)
+        if a == "interpret":
+            rs.set_interpretation(st, "finding", fid, body.get("interpretation") or {}, author=author)
+            return rs.get_finding(st, fid)
+        if a == "link":
+            rs.link(st, f"finding:{fid}", body.get("to") or "", body.get("relation") or "", note=body.get("note"), actor=who)
+            return rs.get_finding(st, fid)
+        if a in ("derive_hypothesis", "derive"):
+            hy = dict(body.get("hypothesis") or {})
+            return rs.derive_hypothesis(st, fid, hy.pop("statement", None) or body.get("statement") or "", actor=who, **hy)
+        if a == "withdraw":
+            return rs.withdraw(st, "finding", fid, body.get("reason") or "", actor=who)
+        if a == "update":
+            return rs.update_finding(st, fid, body.get("changes") or {}, actor=who)
+        raise ValueError("action: evidence | interpret | link | derive_hypothesis | withdraw | update")
+    raise LookupError(f"unknown research resource {sub}")
+
+
+def _research_filters(qp) -> dict:
+    out = {k: (qp.get(k) or None) for k in ("series", "kind", "status", "verdict", "theory", "dataset", "project", "flag")}
+    if qp.get("exploratory") in ("1", "true", "0", "false"):
+        out["exploratory"] = qp.get("exploratory") in ("1", "true")
+    out["limit"] = min(int(qp.get("limit") or 500), 1000)
+    return out
+
+
+async def research_api(request):
+    """Research registry for the portal (internal included). GET /api/research – {board, worklist, evidence_map, stats,
+    labels}; GET /api/research?stats=1 – only {series, hypotheses, findings, worklist, worklist_counts} for the sidebar. GET /api/research/search?q=&series=&kind=&status=&verdict=&theory=&dataset=&flag=&type= – briefs.
+    GET /api/research/series · /series/<slug>. GET /api/research/hypotheses?… · /hypotheses/<id|code>.
+    GET /api/research/findings?… · /findings/<id|code>. POST /api/research/hypotheses {statement, …} creates;
+    POST /api/research/hypotheses/<id> {action: prereg | draft | start | deviate | result | interpret | link | withdraw |
+    revise | update}; POST /api/research/findings[/<id>] likewise (evidence | interpret | link | derive_hypothesis |
+    withdraw | update); POST /api/research/series[/<slug>]. A frozen pre-registration is never edited (deviations only)."""
+    from fundus import research as rs
+    sub, rid = request.path_params.get("sub"), request.path_params.get("rid")
+    qp = request.query_params
+    if request.method == "POST":
+        body, err = await _json_body(request)
+        if err:
+            return err
+        if sub not in ("series", "hypotheses", "findings"):
+            return _api_response(request, {"error": "POST /api/research/series | hypotheses | findings[/<id>]"}, 400)
+        return _api_call(request, lambda st: _research_post(st, sub, rid, body))
+    if sub is None and qp.get("stats") in ("1", "true"):
+        return _api_call(request, lambda st: rs.sidebar_stats(st))     # sidebar badge: small counts only
+    if sub is None:
+        return _api_call(request, lambda st: rs.overview(st))
+    if sub == "search":
+        return _api_call(request, lambda st: rs.search(st, qp.get("q") or "", include_internal=True, type=qp.get("type") or None,
+                                                       **_research_filters(qp)))
+    if sub == "series":
+        return _api_call(request, (lambda st: rs.series_get(st, rid)) if rid else (lambda st: {"series": rs.series_list(st)}))
+    if sub == "hypotheses":
+        return _api_call(request, (lambda st: rs.get_hypothesis(st, rid)) if rid else
+                         (lambda st: rs.list_hypotheses(st, question=qp.get("q") or "", **_research_filters(qp))))
+    if sub == "findings":
+        return _api_call(request, (lambda st: rs.get_finding(st, rid)) if rid else
+                         (lambda st: rs.list_findings(st, question=qp.get("q") or "", **_research_filters(qp))))
+    return _api_response(request, {"error": "unknown research resource"}, 404)
 
 
 async def dataset_upload(request):
@@ -2205,7 +2708,9 @@ async def dataset_upload(request):
         if not n:
             return _api_response(request, {"error": "no files"}, 400)
         meta = {k: (form.get(k) or None) for k in ("title", "description", "source_title", "publisher", "license", "published",
-                                                   "project", "note", "dataset")}
+                                                   "project", "note", "dataset",
+                                                   # a new version of a text with versions (portal: "Neue Fassung …")
+                                                   "valid_from", "valid_to", "version_label", "published_at", "source_url")}
 
         def run():
             st = Store(_db_path)
@@ -2528,9 +3033,15 @@ def build_server():
     server.custom_route("/api/datasets", methods=["GET"], name="datasets_api", include_in_schema=False)(datasets_api)
     server.custom_route("/api/datasets/upload", methods=["POST"], name="dataset_upload", include_in_schema=False)(dataset_upload)
     server.custom_route("/api/datasets/ask", methods=["POST"], name="dataset_ask", include_in_schema=False)(datasets_api)
+    server.custom_route("/api/datasets/catalog", methods=["GET"], name="dataset_catalog", include_in_schema=False)(datasets_api)
+    server.custom_route("/api/datasets/reference", methods=["POST"], name="dataset_reference", include_in_schema=False)(datasets_api)
     server.custom_route("/api/datasets/{did:int}", methods=["GET", "POST"], name="dataset_api", include_in_schema=False)(datasets_api)
     server.custom_route("/api/datasets/{did:int}/{sub}", methods=["GET", "POST"], name="dataset_sub", include_in_schema=False)(datasets_api)
     server.custom_route("/datasets/{name}", methods=["GET"], name="dataset_file", include_in_schema=False)(dataset_file)
+    server.custom_route("/api/research", methods=["GET"], name="research_api", include_in_schema=False)(research_api)
+    server.custom_route("/api/research/{sub}", methods=["GET", "POST"], name="research_sub", include_in_schema=False)(research_api)
+    server.custom_route("/api/research/{sub}/{rid}", methods=["GET", "POST"], name="research_one",
+                        include_in_schema=False)(research_api)
     server.custom_route("/api/photos", methods=["GET"], name="photos_api", include_in_schema=False)(photos_api)
     server.custom_route("/api/photos/meta", methods=["GET"], name="photos_meta", include_in_schema=False)(photos_api)
     server.custom_route("/api/photos/upload", methods=["POST"], name="photo_upload", include_in_schema=False)(photo_upload)

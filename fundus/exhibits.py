@@ -1718,12 +1718,21 @@ def _slide_shaped(w, h) -> bool:
     return bool(w and h and w >= 1280 and abs(w * 9 / h - 16) <= 0.32)
 
 
+FUNDUS_STORES = ("exhibits", "datasets", "received-files", "received", "photos", "cloud", "backup")
+
+
+def _fundus_data(d: Path) -> bool:
+    """A Fundus data folder (fundus.sqlite next to exhibits/, datasets/ …): its content-addressed store is never scanned
+    as renders (3 Nov 2026: the nightly sync registered 3,698 stored files as a project 'fundus')."""
+    return d.name in FUNDUS_STORES and (d.parent / "fundus.sqlite").exists()
+
+
 def scan(path) -> tuple[list[dict], list[dict]]:
     """Candidate renders under a folder: (items, skipped). An item is an HTML/PNG pair, an SVG/PNG pair or a PNG alone;
     logo/art/skill folders, contact sheets, previews, tests and HTML without PNG (poster sources) are skipped."""
     items, skipped = [], []
     for d, dirs, files in os.walk(path):
-        dirs[:] = sorted(x for x in dirs if not SKIP_DIR_RE.match(x))
+        dirs[:] = sorted(x for x in dirs if not SKIP_DIR_RE.match(x) and not _fundus_data(Path(d) / x))
         fs = set(files)
         stems_png = {f[:-4] for f in fs if f.lower().endswith(".png")}
         for f in sorted(fs):
@@ -1807,12 +1816,25 @@ def import_dir(store: Store, path, project: str | None = None, deck: str | None 
     return {"path": str(path), "counts": counts, "projects": proj, "failed": failed, "skipped": skipped}
 
 
+def _inside(p: Path, folder: Path) -> bool:
+    try:
+        p.relative_to(folder)
+        return True
+    except ValueError:
+        return False
+
+
 def project_roots(store: Store) -> list[Path]:
     """Project folders under PROJECTS_ROOT that already hold registered renders (the project folder of each version's PNG,
     old or category layout; a folder reached through a compatibility symlink counts once, by its real path)."""
     root = Path(os.path.realpath(PROJECTS_ROOT))
+    data = Path(os.path.realpath(store.path.parent))   # Fundus' own stores (stored files, received packages): never a source
+    own = [data / n for n in FUNDUS_STORES]
     out = set()
     for (pth,) in store.db.execute("SELECT DISTINCT png_path FROM exhibit_version WHERE png_path IS NOT NULL"):
+        real = Path(os.path.realpath(pth))
+        if any(_inside(real, o) for o in own):
+            continue
         try:
             rel = Path(pth).relative_to(root)
         except ValueError:

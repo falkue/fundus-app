@@ -5,7 +5,8 @@ the same CLI entry point in a subprocess with this interpreter (sys.executable),
 never takes the server down and the code is loaded fresh like under systemd:
 
     import    daily 03:15  (catch up)   fundus.cli import all; then exhibits sync, entities build (failures ignored)
-    cleanup   daily 04:10  (catch up)   fundus.cli tidy run --actor nightly:tidy; trash purge --expired; datasets purge
+    cleanup   daily 04:10  (catch up)   fundus.cli tidy run --actor nightly:tidy; trash purge --expired; datasets purge;
+                                        then datasets locations, datasets fixity (failures ignored)
     embed     every 15 min              fundus.cli embed (low priority)
     snapshot  hourly :35   (catch up)   fundus.snapshot_job
 
@@ -121,7 +122,8 @@ JOBS = (
     Job("import", Daily(3, 15), (_cli("import", "all"), _cli("exhibits", "sync", optional=True),
                                  _cli("entities", "build", optional=True)), unit="fundus-import.timer"),
     Job("cleanup", Daily(4, 10), (_cli("tidy", "run", "--actor", "nightly:tidy"), _cli("trash", "purge", "--expired"),
-                                  _cli("datasets", "purge")), unit="fundus-cleanup.timer"),
+                                  _cli("datasets", "purge"), _cli("datasets", "locations", optional=True),
+                                  _cli("datasets", "fixity", optional=True)), unit="fundus-cleanup.timer"),
     Job("embed", Every(15), (_cli("embed", timeout=3600),), catch_up=False, low_priority=True, unit="fundus-embed.timer"),
     Job("snapshot", Hourly(35), (Step(("-m", "fundus.snapshot_job"), timeout=3600),), unit="fundus-snapshot.timer"),
 )

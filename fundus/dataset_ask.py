@@ -136,7 +136,7 @@ def _norm(q: str) -> str:
 
 
 def _visible_rows(store: Store, include_internal: bool, project: str | None, visible_project: str | None) -> dict:
-    where, args = ["removed_at IS NULL"], []
+    where, args = ["removed_at IS NULL", "lifecycle != 'withdrawn'"], []     # withdrawn datasets are never suggested
     if project:
         where.append("project = ?")
         args.append(ds._slug(project))
@@ -145,7 +145,7 @@ def _visible_rows(store: Store, include_internal: bool, project: str | None, vis
 
 
 def ask(store: Store, question: str, include_internal: bool = False, project: str | None = None,
-        visible_project: str | None = None, llm=None) -> dict:
+        visible_project: str | None = None, llm=None, actor: str | None = None) -> dict:
     """Answer a free-text question about which datasets exist (see module doc). Returns {question, answer, summary, hits,
     related, candidates, model, seconds, cached}. Takes 20 s – 2 min on the Spark (local model)."""
     question = (question or "").strip()
@@ -156,6 +156,7 @@ def ask(store: Store, question: str, include_internal: bool = False, project: st
     key = (_norm(question), bool(include_internal), project or "", visible_project or "", fp)
     if llm is None and key in _cache:
         _cache.move_to_end(key)
+        _log_hits(store, _cache[key], actor, project)
         return {**_cache[key], "cached": True}
     model = llm or _chat()
     t0 = time.time()
@@ -188,7 +189,14 @@ def ask(store: Store, question: str, include_internal: bool = False, project: st
         _cache[key] = res
         while len(_cache) > CACHE_SIZE:
             _cache.popitem(last=False)
+    _log_hits(store, res, actor, project)
     return res
+
+
+def _log_hits(store: Store, res: dict, actor: str | None, project: str | None) -> None:
+    """Every hit of an answer counts as 'seen' in the dataset usage log (never fails the answer)."""
+    from fundus import dataset_catalog as cat
+    cat.log_uses(store, [h["id"] for h in res.get("hits") or [] if h.get("id")], "ask_hit", actor=actor, project=project)
 
 
 def _info(store: Store, d) -> dict:

@@ -593,6 +593,62 @@ def cmd_platform(a) -> int:
     return 0 if res["last_result"] == "success" else 1
 
 
+def cmd_research(st: Store, a) -> int:
+    """fundus research list|show|search|worklist|series|import|reindex (fundus/research.py, fundus/research_import.py)."""
+    from fundus import research as rs
+    c, args = a.research_cmd, a.args
+    st.actor = "cli"
+    if c == "import":
+        from fundus import research_import as ri
+        if not args:
+            raise ValueError("research import PATH (e.g. ~/Projects/Software/Fundus-Data/_analysen) [--dry-run]")
+        res = ri.run(st, args[0], dry_run=a.dry_run)
+        if not a.verbose:
+            res["warnings"] = res["warnings"][:20]
+        _print(res)
+        return 0
+    if c == "reindex":
+        _print({"indexed": rs.reindex(st)})
+        return 0
+    if c == "worklist":
+        w = rs.worklist(st, limit=a.limit)
+        if a.json:
+            _print(w)
+            return 0
+        print(json.dumps(w["counts"], ensure_ascii=False))
+        for key in ("interpretation_missing", "data_newer_than_result", "idea_without_prereg", "prereg_after_result"):
+            if w[key]:
+                print(f"\n{key} ({w['counts'][key]})")
+                for b in w[key][:a.limit]:
+                    print(f"  {b['code']:<12} {b['series'] or '-':<14} {(b.get('title') or b['statement'])[:90]}")
+        return 0
+    if c == "series":
+        _print(rs.series_get(st, args[0]) if args else rs.series_list(st))
+        return 0
+    if c == "show":
+        if not args:
+            raise ValueError("research show REF (hypothesis:N, finding:N or a code like H8.1 / F4.2)")
+        kind, row = rs._node(st, args[0])
+        out = rs.get_hypothesis(st, row["id"]) if kind == "hypothesis" else rs.get_finding(st, row["id"])
+        if not a.verbose:
+            out.pop("history", None)
+            for r in out.get("results", []):
+                r.pop("method_doc", None)
+                r["evidence"] = len(r.get("evidence") or [])
+        _print(out)
+        return 0
+    res = rs.search(st, " ".join(args) if c == "search" else "", series=a.series, status=a.status, verdict=a.verdict,
+                    kind=a.kind, flag=a.flag, include_internal=True, type=a.type, limit=a.limit)
+    if a.json:
+        _print(res)
+        return 0
+    print(f"{res['total']} ({res['hypotheses']} hypotheses, {res['findings']} findings)")
+    for b in res["items"]:
+        state = b.get("verdict") or b.get("status")
+        print(f"  {b['code']:<12} {b['series'] or '-':<14} {state:<17} {(b.get('title') or b['statement'])[:90]}")
+    return 0
+
+
 def cmd_cloud(st: Store, a) -> int:
     """fundus cloud status|connect|share|poll|contacts|inbox (fundus/cloud.py)."""
     import getpass
@@ -641,6 +697,20 @@ def cmd_cloud(st: Store, a) -> int:
         print(f"error: {e}", file=sys.stderr)
         return 1
     return 0
+
+
+
+def _set_changes(pairs) -> dict:
+    """--set FIELD=VALUE pairs as dataset changes (JSON for code_systems, crosswalk, inputs, tags; keywords comma list)."""
+    ch = {}
+    for kv in pairs or []:
+        k, _, v = kv.partition("=")
+        k, v = k.strip(), v.strip()
+        if v[:1] in "{[" or v in ("true", "false"):
+            ch[k] = json.loads(v)
+        else:
+            ch[k] = [x.strip() for x in v.split(",")] if k == "keywords" else (v or None)
+    return ch
 
 
 def main(argv=None) -> int:
@@ -839,16 +909,54 @@ def main(argv=None) -> int:
 
     p = sub.add_parser("datasets", help="datasets (fundus.datasets): add files/folders, describe, search, show, query, purge")
     p.add_argument("datasets_cmd", choices=("add", "describe", "search", "show", "preview", "query", "update", "checked", "due", "crosswalk",
-                                            "remove", "restore", "purge", "ask"))
-    p.add_argument("args", nargs="*", help="add: files/folders · search: words · ask: a free-text question (local model) · show/preview/query/remove/restore: ref (query: ref SQL)")
+                                            "remove", "restore", "purge", "ask", "catalog", "locations", "fixity", "orphans",
+                                            "at", "version", "convert-text"))
+    p.add_argument("args", nargs="*", help="add: files/folders · search: words · ask: a free-text question (local model) · "
+                                           "show/preview/query/remove/restore: ref (query: ref SQL) · at: REF YYYY-MM-DD · "
+                                           "version: REF N (with --valid-from/--valid-to/--version-label …) · convert-text: REF --spec FILE")
     for o in ("--title", "--description", "--publisher", "--source-title", "--url", "--license", "--published", "--project", "--note",
               "--dataset", "--table"):
         p.add_argument(o)
     p.add_argument("--visibility", default="public", choices=("public", "internal"))
     p.add_argument("--retry-failed", action="store_true")
-    p.add_argument("--internal", action="store_true", help="ask: include internal datasets")
+    p.add_argument("--internal", action="store_true", help="add: same as --visibility internal · ask: include internal datasets")
     p.add_argument("--set", action="append", default=[], metavar="FIELD=VALUE", help="update: e.g. --set period='2008-Q1 – 2026-Q3'")
     p.add_argument("--next-expected", help="checked: ISO month of the next edition")
+    p.add_argument("--reference", action="store_true", help="add: register ONE folder/file as a reference (nothing copied)")
+    p.add_argument("--retrieved-at", help="add: ISO date the data was obtained (citation)")
+    p.add_argument("--script", help="add: script that fetched or built the data (provenance)")
+    p.add_argument("--all", action="store_true", help="fixity: check every file (default: within --budget-gb)")
+    p.add_argument("--budget-gb", type=float, default=20, help="fixity: GB of originals to re-hash per run (default 20)")
+    p.add_argument("--purge", action="store_true", help="orphans: DELETE the reported orphan files (only on Falk's instruction)")
+    # texts with versions (fundus.dataset_texts): laws, regulations, guidelines, standards, terms, policies
+    p.add_argument("--text", action="store_true", help="add: a text with versions – files kept as delivered (documents), "
+                                                       "never parsed; needs --act-type (new text) and --valid-from")
+    p.add_argument("--identifier", help="add --text: official identifier (ELI, CELEX, SR number, URL)")
+    p.add_argument("--jurisdiction", help="add --text: EU, CH, DE, US, …")
+    p.add_argument("--act-type", choices=("law", "regulation", "directive", "ordinance", "guideline", "standard", "terms", "policy", "other"))
+    p.add_argument("--issuer", help="add --text: issuing body")
+    p.add_argument("--valid-from", help="add --text / version: ISO date from which this version applies")
+    p.add_argument("--valid-to", help="add --text / version: ISO date of its last day (empty: still valid)")
+    p.add_argument("--version-label", help="add --text / version: e.g. 'konsolidierte Fassung vom 27.07.2026'")
+    p.add_argument("--published-at", help="add --text / version: ISO date of publication")
+    p.add_argument("--source-url", help="add --text / version: where this version was obtained")
+    p.add_argument("--spec", help="convert-text: JSON file {identifier, jurisdiction, act_type, issuer, base, versions: […]}")
+    p.add_argument("--dry-run", action="store_true", help="convert-text: show the plan, change nothing")
+
+    p = sub.add_parser("research", help="research registry: hypotheses (pre-registered) and findings – list, show, search, "
+                                        "worklist, series, import, reindex (fundus.research)")
+    p.add_argument("research_cmd", choices=("list", "show", "search", "worklist", "series", "import", "reindex"))
+    p.add_argument("args", nargs="*", help="show: ref · search: words · series: slug · import: folder (_analysen)")
+    p.add_argument("--dry-run", action="store_true", help="import: count only, write nothing")
+    p.add_argument("--series")
+    p.add_argument("--status")
+    p.add_argument("--verdict")
+    p.add_argument("--kind")
+    p.add_argument("--flag")
+    p.add_argument("--type", choices=("hypothesis", "finding"))
+    p.add_argument("--limit", type=int, default=100)
+    p.add_argument("--json", action="store_true")
+    p.add_argument("--verbose", action="store_true")
 
     p = sub.add_parser("cloud", help="Fundus Cloud: send slide packages end-to-end encrypted to other Fundus installations")
     p.add_argument("cloud_cmd", choices=("status", "connect", "disconnect", "share", "poll", "inbox", "lookup", "contacts"))
@@ -950,6 +1058,18 @@ def main(argv=None) -> int:
     p.add_argument("sched_cmd", choices=("status", "run"))
     p.add_argument("job", nargs="?", help="run: import | cleanup | embed | snapshot")
 
+    p = sub.add_parser("llm", help="optional language model: check endpoint, models, image input and embedding dimension")
+    p.add_argument("llm_cmd", choices=("check",))
+    p.add_argument("--quick", action="store_true", help="only the endpoint and its model list, no test requests")
+    p.add_argument("--timeout", type=float, default=600, help="seconds per test request (loading a big model takes a while)")
+    p.add_argument("--json", action="store_true", help="the report as JSON")
+
+    p = sub.add_parser("vertex", help="optional Gemini on Vertex AI (slide reviews): check project, region, credentials, model")
+    p.add_argument("vertex_cmd", choices=("check",))
+    p.add_argument("--model", help="model to test (default: the first of vertex_models)")
+    p.add_argument("--no-call", action="store_true", help="do not send the test request (no cost), only credentials")
+    p.add_argument("--json", action="store_true", help="the report as JSON")
+
     p = sub.add_parser("export", help="export items (public only by default)")
     p.add_argument("--format", choices=("jsonl", "csv"), default="jsonl")
     p.add_argument("--out", help="file (default stdout)")
@@ -959,6 +1079,16 @@ def main(argv=None) -> int:
     a = ap.parse_args(argv)
     if a.cmd in ("serve", "render", "service", "scheduler"):   # no Store here: they open their own (or none)
         return cmd_platform(a)
+    if a.cmd in ("llm", "vertex"):   # checks of the optional services: no Store (they never write to the archive)
+        if a.cmd == "llm":
+            from fundus import llm
+            rep = llm.check(a.db or None, quick=a.quick, timeout=a.timeout)
+            print(json.dumps(rep, ensure_ascii=False, indent=2) if a.json else llm.format_check(rep))
+        else:
+            from fundus import gemini
+            rep = gemini.check(a.model, call=not a.no_call)
+            print(json.dumps(rep, ensure_ascii=False, indent=2) if a.json else gemini.format_check(rep))
+        return 0 if rep["ok"] else 1
     if a.cmd == "paths":   # before opening the Store: the dry run must not write (Store() runs the schema migrations)
         from fundus.relocate import rewrite
         try:
@@ -1027,36 +1157,88 @@ def main(argv=None) -> int:
             return cmd_journals(st, a)
         elif a.cmd == "tidy":
             return cmd_tidy(st, a)
+        elif a.cmd == "research":
+            return cmd_research(st, a)
         elif a.cmd == "datasets":
             from fundus import datasets as dsm
             c, args = a.datasets_cmd, a.args
-            if c == "add":
+            from fundus import dataset_catalog as cat
+
+            def _after_add(res):
+                """add/--reference: apply --set FIELD=VALUE and --next-expected right away (no separate update needed)."""
+                ch = _set_changes(a.set)
+                if a.next_expected:
+                    ch["next_expected"] = a.next_expected
+                if ch and isinstance(res, dict) and res.get("ref"):
+                    res["updated"] = dsm.update(st, res["ref"], ch, actor="cli").get("changed", sorted(ch))
+                return res
+            if c == "add" and a.internal:      # `add --internal` means visibility internal (it was silently ignored before)
+                a.visibility = "internal"
+            if c == "add" and a.reference:
+                if len(args) != 1:
+                    raise ValueError("datasets add --reference PATH (one folder or file)")
+                _print(_after_add(cat.add_reference(st, args[0], title=a.title, description=a.description, source_title=a.source_title,
+                                         publisher=a.publisher, url_=a.url, license=a.license, published=a.published,
+                                         project=a.project, visibility=a.visibility, note=a.note, retrieved_at=a.retrieved_at,
+                                         script=a.script, actor="cli")))
+            elif c == "add":
                 prog = lambda n, t, f: print(f"\r{n}/{t} {Path(f).name[:60]:60}", end="", file=sys.stderr, flush=True)
-                _print(dsm.add(st, args, title=a.title, description=a.description, source_title=a.source_title, publisher=a.publisher,
+                _print(_after_add(dsm.add(st, args, title=a.title, description=a.description, source_title=a.source_title, publisher=a.publisher,
                                url_=a.url, license=a.license, published=a.published, project=a.project, visibility=a.visibility,
-                               dataset=a.dataset, note=a.note, actor="cli", progress=prog))
+                               dataset=a.dataset, note=a.note, actor="cli", progress=prog, retrieved_at=a.retrieved_at,
+                               script=a.script, text=a.text, identifier=a.identifier, jurisdiction=a.jurisdiction,
+                               act_type=a.act_type, issuer=a.issuer, valid_from=a.valid_from, valid_to=a.valid_to,
+                               version_label=a.version_label, published_at=a.published_at, source_url=a.source_url)))
             elif c == "describe":
                 _print(dsm.describe_pending(st, retry_failed=a.retry_failed))
+            elif c in ("at", "version", "convert-text"):      # texts with versions
+                from fundus import dataset_texts as tx
+                if c == "at":
+                    if len(args) != 2:
+                        raise ValueError("datasets at REF YYYY-MM-DD")
+                    _print(tx.version_at(st, args[0], args[1]))
+                elif c == "version":
+                    if len(args) != 2:
+                        raise ValueError("datasets version REF N --valid-from … [--valid-to …] [--version-label …]")
+                    ch = {k: getattr(a, k) for k in tx.VERSION_FIELDS if getattr(a, k) is not None}
+                    _print(tx.set_version(st, args[0], int(args[1]), ch, actor="cli"))
+                else:
+                    if len(args) != 1 or not a.spec:
+                        raise ValueError("datasets convert-text REF --spec FILE [--dry-run]")
+                    _print(tx.convert(st, args[0], json.loads(Path(a.spec).read_text()), actor="cli", dry_run=a.dry_run))
             elif c == "search":
                 _print(dsm.search(st, " ".join(args), project=a.project, include_internal=True))
             elif c == "ask":                  # free-text question to the local model, from the descriptions only
                 from fundus import dataset_ask
                 _print(dataset_ask.ask(st, " ".join(args), include_internal=a.internal, project=a.project))
             elif c == "show":
-                _print(dsm.get(st, args[0]))
+                out = dsm.get(st, args[0])
+                cat.log_use(st, out["id"], "show", actor="cli", project=a.project)
+                _print(out)
             elif c == "preview":
-                _print(dsm.preview(st, args[0], table=a.table))
+                out = dsm.preview(st, args[0], table=a.table)
+                cat.log_use(st, out["dataset"], "preview", actor="cli", project=a.project, detail={"table": out.get("table")})
+                _print(out)
             elif c == "query":
-                _print(dsm.query(st, args[0], " ".join(args[1:])))
+                out = dsm.query(st, args[0], " ".join(args[1:]))
+                cat.log_use(st, out["dataset"], "query", actor="cli", project=a.project, detail=" ".join(args[1:])[:300])
+                _print(out)
+            elif c == "catalog":
+                _print(cat.catalog(st, removed=bool(args and args[0] == "removed"))["stats"])
+            elif c == "locations":          # nightly: re-check the folders of reference datasets
+                _print(cat.refresh_locations(st, actor="cli"))
+            elif c == "fixity":             # nightly: re-hash originals within a budget, report orphans
+                res = cat.fixity(st, budget_gb=a.budget_gb, all=a.all, actor="cli")
+                o = res["orphans"]
+                print(f"fixity: {res['checked']} files checked, {res['ok']} ok, {len(res['failed'])} failed, "
+                      f"{res['bytes_hashed'] / 1024 ** 3:.1f} GB hashed, {res['left']} left for later runs", file=sys.stderr)
+                print(f"orphans: {o['files']} files/folders, {o['bytes'] / 1024 ** 2:.1f} MB (report only; delete with "
+                      f"`datasets orphans --purge` on Falk's instruction)", file=sys.stderr)
+                _print(res)
+            elif c == "orphans":            # report; --purge deletes – only when Falk asks, never nightly
+                _print(cat.purge_orphans(st, actor="cli") if a.purge else cat.orphans(st))
             elif c == "update":
-                ch = {}
-                for kv in a.set:
-                    k, _, v = kv.partition("=")
-                    v = v.strip()
-                    if v[:1] in "{[" or v in ("true", "false"):      # JSON values: code_systems, crosswalk, inputs, tags
-                        ch[k.strip()] = json.loads(v)
-                    else:
-                        ch[k.strip()] = [x.strip() for x in v.split(",")] if k.strip() == "keywords" else (v or None)
+                ch = _set_changes(a.set)
                 if not args or not ch:
                     raise ValueError("datasets update REF --set field=value [--set …]")
                 _print(dsm.update(st, args[0], ch, actor="cli"))

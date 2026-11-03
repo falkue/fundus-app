@@ -359,3 +359,79 @@ def test_timed_out_descriptions_are_retried(store, tmp_path):
     assert r["dataset"] in ds.pending(store, retry_timeouts=True)
     store.db.execute("UPDATE dataset SET error = 'TimeoutError: timed out [attempt 3 2020-01-01 00:00]' WHERE id = ?", (r["dataset"],))
     assert r["dataset"] not in ds.pending(store, retry_timeouts=True)        # gave up after three attempts
+
+
+def test_snb_preamble_and_multiline_xlsx_headers(store, tmp_path):
+    """SNB data portal CSVs start with a metadata block and a blank line; survey workbooks have multi-line question
+    headers – both must come in as proper tables (reported by the slide session, 3 Nov 2026)."""
+    d = tmp_path / "snb"
+    d.mkdir()
+    (d / "amarbma_de.csv").write_text('﻿"CubeId";"amarbma"\n"PublishingDate";"2026-10-21 09:00"\n\n'
+                                      '"Date";"D0";"Value"\n"1948-01";"K";\n"1948-02";"K";1,5\n"1948-03";"Q";2,25\n',
+                                      encoding="utf-8")
+    import openpyxl
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.append(["ID", "Wie oft nutzen Sie KI?\n(1 = nie, 5 = täglich)", "Wofür?\nMehrfachnennung"])
+    ws.append([1, 4, "Lehre\nForschung"])
+    ws.append([2, 2, "Verwaltung"])
+    wb.save(d / "umfrage.xlsx")
+    res = ds.add(store, [d], title="SNB und Umfrage")
+    got = ds.get(store, res["ref"])
+    cols = {t["file"]: [c["name"] for c in t["columns"]] for t in got["tables_detail"]}
+    assert cols["amarbma_de.csv"] == ["Date", "D0", "Value"]
+    assert cols["umfrage.xlsx"] == ["ID", "Wie oft nutzen Sie KI? (1 = nie, 5 = täglich)", "Wofür? Mehrfachnennung"]
+    rows = {t["file"]: t["rows"] for t in got["tables_detail"]}
+    assert rows == {"amarbma_de.csv": 3, "umfrage.xlsx": 2}
+    assert ds._preamble_rows("a;b;c\n1;2;3\n\n4;5;6\n", ";") == 0   # a blank line inside data is not a preamble
+
+
+def test_cli_add_internal_flag_sets_visibility(tmp_path, monkeypatch):
+    """`datasets add --internal` must create an internal dataset (it was silently public before)."""
+    import subprocess
+    import sys
+    from pathlib import Path
+    d = tmp_path / "in2"
+    d.mkdir()
+    (d / "t.csv").write_text("a,b\n1,2\n")
+    db = tmp_path / "cli.sqlite"
+    root = Path(__file__).resolve().parent.parent
+    env = {**__import__("os").environ, "FUNDUS_DATASET_DIR": str(tmp_path / "datasets"), "FUNDUS_SCHEDULER": "0"}
+    out = subprocess.run([sys.executable, "-m", "fundus.cli", "--db", str(db), "datasets", "add", str(d / "t.csv"),
+                          "--title", "Intern", "--internal"], cwd=root, env=env, capture_output=True, text=True)
+    assert out.returncode == 0, out.stderr
+    import sqlite3
+    assert sqlite3.connect(db).execute("SELECT visibility FROM dataset").fetchone()[0] == "internal"
+
+
+def test_csv_gz_is_a_table(store, tmp_path):
+    import gzip
+    d = tmp_path / "gz"
+    d.mkdir()
+    with gzip.open(d / "listings.csv.gz", "wt", encoding="utf-8") as f:
+        f.write("id,price\n1,120\n2,95\n3,240\n")
+    (d / "junk.tar.gz").write_bytes(b"\x1f\x8b not a table")
+    res = ds.add(store, [d], title="Airbnb")
+    got = ds.get(store, res["ref"])
+    assert [(t["table"], t["rows"]) for t in got["tables_detail"]] == [("listings", 3)]
+    assert any("junk.tar.gz" in s["file"] for s in res["skipped"])
+
+
+def test_cli_add_applies_set_and_next_expected(tmp_path):
+    import os
+    import sqlite3
+    import subprocess
+    import sys
+    from pathlib import Path
+    d = tmp_path / "in3"
+    d.mkdir()
+    (d / "t.csv").write_text("a,b\n1,2\n")
+    db = tmp_path / "cli2.sqlite"
+    env = {**os.environ, "FUNDUS_DATASET_DIR": str(tmp_path / "datasets"), "FUNDUS_SCHEDULER": "0"}
+    out = subprocess.run([sys.executable, "-m", "fundus.cli", "--db", str(db), "datasets", "add", str(d / "t.csv"),
+                          "--title", "Mit Rhythmus", "--set", "frequency=annual", "--set", "update_hint=see url",
+                          "--next-expected", "2027-03"], cwd=Path(__file__).resolve().parent.parent, env=env,
+                         capture_output=True, text=True)
+    assert out.returncode == 0, out.stderr
+    row = sqlite3.connect(db).execute("SELECT frequency, next_expected, update_hint FROM dataset").fetchone()
+    assert row == ("annual", "2027-03", "see url")

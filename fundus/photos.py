@@ -41,11 +41,11 @@ import urllib.request
 from datetime import datetime
 from pathlib import Path
 
-from fundus import config as _config
+from fundus import config as _config, llm as _llmcfg
 from fundus.store import Store, slug as _slug
 
 PUBLIC_URL = _config.public_url()   # $FUNDUS_PUBLIC_URL, config file, the running server, else http://127.0.0.1:8010
-LLM_MODEL = os.environ.get("FUNDUS_PHOTO_MODEL", "gemma4:26b")
+LLM_MODEL = _llmcfg.settings()["model_vision"]   # llm_model_vision in fundus.config (FUNDUS_PHOTO_MODEL still works)
 LLM_TIMEOUT = 300
 LLM_IMAGE_EDGE = 1024           # long edge of the JPEG sent to the LLM
 MAX_FILE_BYTES = 300 * 1024 * 1024
@@ -569,16 +569,19 @@ def _iso_local(v: str | None) -> str | None:
 
 # ------------------------------------------------------------------ annotation (local vision LLM)
 class OllamaVision:
-    """Ollama /api/chat with one image, JSON answer; respects an optional FUNDUS_MAX_MODELS limit (fundus.embed)."""
+    """The configured vision model (llm_model_vision) with one image, JSON answer: Ollama /api/chat (respects an optional
+    FUNDUS_MAX_MODELS limit, fundus.embed) or an OpenAI-compatible /v1/chat/completions with an image part."""
 
-    def __init__(self, model: str = LLM_MODEL, url: str | None = None):
-        from fundus import embed
-        self.model = model
-        self.url = (url or embed.OLLAMA_URL).rstrip("/")
+    def __init__(self, model: str | None = None, url: str | None = None):
+        s = _llmcfg.settings()
+        self.model = model or s["model_vision"]
+        self.url = (url or s["url"]).rstrip("/")
+        self.api = s["api"]
 
     def check_capacity(self) -> None:
         from fundus import embed
-        if embed.MAX_LOADED_MODELS <= 0:
+        _llmcfg.require()
+        if embed.MAX_LOADED_MODELS <= 0 or self.api != "ollama":
             return
         loaded = embed.OllamaEmbedder(url=self.url).loaded_models()
         if not embed.capacity_ok(loaded, self.model):
@@ -586,7 +589,11 @@ class OllamaVision:
 
     def describe(self, prompt: str, jpeg: bytes) -> dict:
         from fundus.entities import LLM_KEEP_ALIVE, LLM_NUM_CTX
-        body = {"model": self.model, "format": "json", "stream": False, "think": False, "keep_alive": LLM_KEEP_ALIVE,
+        s = _llmcfg.require()
+        if self.api == "openai":
+            msgs = [{"role": "user", "content": [{"type": "text", "text": prompt}, _llmcfg.openai_image_part(jpeg)]}]
+            return _llmcfg.openai_chat_json(self.model, msgs, None, 2048, LLM_TIMEOUT, {**s, "url": self.url})
+        body ={"model": self.model, "format": "json", "stream": False, "think": False, "keep_alive": LLM_KEEP_ALIVE,
                 "options": {"temperature": 0, "num_ctx": LLM_NUM_CTX, "num_predict": 2048},   # same context as the warm
                 # gemma4 (no second copy); the cap ends a looping answer (a description is ~600 tokens)
                 "messages": [{"role": "user", "content": prompt, "images": [base64.b64encode(jpeg).decode()]}]}

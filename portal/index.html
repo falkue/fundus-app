@@ -13,7 +13,7 @@
 <link rel="stylesheet" href="css/tokens.css">
 <link rel="stylesheet" href="css/app.css">
 <link rel="stylesheet" href="stats/charts.css">
-<link rel="stylesheet" href="css/portal.css?v=51">
+<link rel="stylesheet" href="css/portal.css?v=54">
 <script>
   // Theme früh setzen (kein Flackern): auto | light | dark aus localStorage
   try { var t = localStorage.getItem('fundus-theme'); if (t === 'light' || t === 'dark') document.documentElement.dataset.theme = t; } catch (e) {}
@@ -59,6 +59,9 @@
     <symbol id="ic-inbox" viewBox="0 0 16 16"><path d="M2 9.2l1.7-5.4c.2-.5.6-.8 1.1-.8h6.4c.5 0 .9.3 1.1.8L14 9.2v3.3c0 .7-.5 1.2-1.2 1.2H3.2c-.7 0-1.2-.5-1.2-1.2z" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linejoin="round"/><path d="M2.2 9.2h3.3l.9 1.6h3.2l.9-1.6h3.3" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linejoin="round"/></symbol>
     <symbol id="ic-send" viewBox="0 0 16 16"><path d="M14 2L7.2 8.8M14 2l-4.2 12-2.6-5.2L2 6.2z" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linejoin="round" stroke-linecap="round"/></symbol>
     <symbol id="ic-search" viewBox="0 0 16 16"><circle cx="7" cy="7" r="4.6" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="M10.4 10.4l3.6 3.6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></symbol>
+    <symbol id="ic-flask" viewBox="0 0 16 16"><path d="M6.2 2h3.6M6.8 2v4.2L2.9 12.6c-.5.8.1 1.9 1.1 1.9h8c1 0 1.6-1.1 1.1-1.9L9.2 6.2V2M4.6 10h6.8" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+    <symbol id="ic-hypo" viewBox="0 0 16 16"><circle cx="8" cy="8" r="5.8" fill="none" stroke="currentColor" stroke-width="1.35"/><circle cx="8" cy="8" r="2.6" fill="none" stroke="currentColor" stroke-width="1.35"/><circle cx="8" cy="8" r=".9" fill="currentColor"/></symbol>
+    <symbol id="ic-finding" viewBox="0 0 16 16"><path d="M8 1.8v2.4M8 11.8v2.4M1.8 8h2.4M11.8 8h2.4" stroke="currentColor" stroke-width="1.35" stroke-linecap="round"/><circle cx="8" cy="8" r="3.6" fill="none" stroke="currentColor" stroke-width="1.35" stroke-dasharray="2 1.6"/></symbol>
   </defs>
 </svg>
 
@@ -101,6 +104,6 @@
   "@floating-ui/core": "./stats/vendor/floating-ui/core.js",
   "@floating-ui/dom": "./stats/vendor/floating-ui/dom.js"
 }}</script>
-<script type="module" src="js/main.js?v=71"></script>
+<script type="module" src="js/main.js?v=75"></script>
 </body>
 </html>

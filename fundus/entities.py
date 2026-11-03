@@ -37,6 +37,7 @@ import urllib.request
 from collections import Counter, defaultdict
 from pathlib import Path
 
+from fundus import llm as _llmcfg
 from fundus.store import ITEM_KINDS, Store
 
 KINDS = ("organisation", "person", "product")
@@ -45,9 +46,11 @@ ROLE_RANK = {r: i for i, r in enumerate(ROLES)}          # lower = stronger
 LINK_KINDS = ITEM_KINDS + ("series",)
 ACTOR = "entities"
 
-LLM_MODEL = os.environ.get("FUNDUS_ENTITY_MODEL", "gemma4:26b")
+# endpoint, API style, text model and context come from fundus.config (llm_url, llm_api, llm_model_text, llm_num_ctx);
+# FUNDUS_ENTITY_MODEL still overrides the model for the entity enrichment
+LLM_MODEL = os.environ.get("FUNDUS_ENTITY_MODEL") or _llmcfg.settings()["model_text"]
 LLM_KEEP_ALIVE = os.environ.get("FUNDUS_ENTITY_KEEP_ALIVE", "24h")   # do not shorten the keep-alive of a shared model
-LLM_NUM_CTX = int(os.environ.get("FUNDUS_LLM_NUM_CTX", "262144"))   # = keep-gemma4-warm, TaskMe, OpenClaw
+LLM_NUM_CTX = _llmcfg.settings()["num_ctx"]   # the context of the warm shared instance (a different one loads a second copy)
 LLM_BATCH = 20
 LLM_TIMEOUT = 900
 # Longest answer we accept. In JSON mode with temperature 0 gemma4 can fall into a loop and write until the context is
@@ -722,18 +725,21 @@ Answer with JSON: {"entities": [ ... ]} with exactly one object per input."""
 
 
 class OllamaChat:
-    """Minimal Ollama /api/chat client in JSON mode (respects an optional FUNDUS_MAX_MODELS limit)."""
+    """Minimal JSON chat client for the configured text model: Ollama /api/chat (respects an optional FUNDUS_MAX_MODELS
+    limit) or, with llm_api = 'openai', an OpenAI-compatible /v1/chat/completions (fundus.llm)."""
 
-    def __init__(self, model: str = LLM_MODEL, url: str | None = None, max_tokens: int = LLM_MAX_TOKENS,
+    def __init__(self, model: str | None = None, url: str | None = None, max_tokens: int = LLM_MAX_TOKENS,
                  timeout: float = LLM_TIMEOUT):
-        from fundus import embed
-        self.model = model
-        self.url = (url or embed.OLLAMA_URL).rstrip("/")
+        s = _llmcfg.settings()
+        self.model = model or os.environ.get("FUNDUS_ENTITY_MODEL") or s["model_text"]
+        self.url = (url or s["url"]).rstrip("/")
+        self.api = s["api"]
         self.max_tokens, self.timeout = int(max_tokens), timeout
 
     def check_capacity(self) -> None:
         from fundus import embed
-        if embed.MAX_LOADED_MODELS <= 0:
+        _llmcfg.require()
+        if embed.MAX_LOADED_MODELS <= 0 or self.api != "ollama":
             return
         loaded = embed.OllamaEmbedder(url=self.url).loaded_models()
         if not embed.capacity_ok(loaded, self.model):
@@ -743,6 +749,10 @@ class OllamaChat:
         """JSON answer (with `schema`: constrained to that JSON schema). A runaway answer stops at max_tokens (then it is
         cut JSON → ValueError); a request that waits or runs longer than `timeout` is dropped, which also makes Ollama
         stop generating."""
+        s = _llmcfg.require()
+        if self.api == "openai":
+            return _llmcfg.openai_chat_json(self.model, [{"role": "system", "content": system}, {"role": "user", "content": user}],
+                                            schema, self.max_tokens, self.timeout, {**s, "url": self.url})
         body = {"model": self.model, "format": schema or "json", "stream": False, "think": False, "keep_alive": LLM_KEEP_ALIVE,
                 # num_ctx: same context as the warm shared gemma4 instance – without it Ollama uses its default context
                 # and loads gemma4 a second time (a duplicate copy on the GPU)

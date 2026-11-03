@@ -221,6 +221,12 @@ class Store:
             self.db.execute("ALTER TABLE feedback ADD COLUMN remote_state TEXT")
         self._migrate_exhibits()
         self._migrate_exhibit_sets()
+        # column counts of dataset tables, cached from the profiles once (catalog without parsing 190 MB of JSON)
+        self.db.execute("UPDATE dataset_file SET columns_n = coalesce(json_array_length(profile, '$.columns'), 0) "
+                        "WHERE role = 'table' AND columns_n IS NULL AND profile IS NOT NULL AND json_valid(profile)")
+        # covering index for the dataset catalog (fundus.dataset_catalog.FILE_COLS): no profile blobs read
+        self.db.execute("CREATE INDEX IF NOT EXISTS ix_dataset_file_catalog ON dataset_file(dataset_id, version, role, rows, "
+                        "columns_n, bytes, sha, ext, parquet_sha, verified_at, verified_ok, name, table_name)")
         self.db.execute("CREATE INDEX IF NOT EXISTS ix_exhibit_global ON exhibit(global_id)")   # after the column migration
         self._migrate_entity_link()
         if not self.db.execute("SELECT 1 FROM vocab LIMIT 1").fetchone():
@@ -254,7 +260,24 @@ class Store:
                     # linked data (1 Nov 2026): crosswalk datasets, column code systems, tables across versions
                     "kind": "TEXT NOT NULL DEFAULT 'data' CHECK (kind IN ('data','crosswalk'))", "crosswalk": "TEXT",
                     "code_systems": "TEXT",
-                    "table_scope": "TEXT NOT NULL DEFAULT 'version' CHECK (table_scope IN ('version','merged'))"},
+                    "table_scope": "TEXT NOT NULL DEFAULT 'version' CHECK (table_scope IN ('version','merged'))",
+                    # catalog & archive (3 Nov 2026): lifecycle, reference datasets, provenance
+                    "lifecycle": "TEXT NOT NULL DEFAULT 'active' CHECK (lifecycle IN ('active','superseded','withdrawn'))",
+                    "superseded_by": "INTEGER", "lifecycle_note": "TEXT", "lifecycle_at": "TEXT",
+                    "holding": "TEXT NOT NULL DEFAULT 'stored' CHECK (holding IN ('stored','reference'))",
+                    "retrieved_at": "TEXT", "script": "TEXT",
+                    # texts with versions (3 Nov 2026, fundus.dataset_texts): a dataset is a text when act_type is set.
+                    # Not a new value of `kind`: widening that CHECK would mean rebuilding the dataset table (four tables
+                    # reference it); an added column is a plain ALTER TABLE.
+                    "identifier": "TEXT", "jurisdiction": "TEXT",
+                    "act_type": "TEXT CHECK (act_type IN ('law','regulation','directive','ordinance','guideline','standard',"
+                                "'terms','policy','other'))",
+                    "issuer": "TEXT"},
+        # validity of a text's versions (3 Nov 2026)
+        "dataset_version": {"valid_from": "TEXT", "valid_to": "TEXT", "version_label": "TEXT", "published_at": "TEXT",
+                            "source_url": "TEXT"},
+        # column count cache and fixity of dataset files (3 Nov 2026)
+        "dataset_file": {"columns_n": "INTEGER", "verified_at": "TEXT", "verified_ok": "INTEGER"},
         "photo": {"media": "TEXT NOT NULL DEFAULT 'photo' CHECK (media IN ('photo','video'))", "duration": "REAL", "fps": "REAL",
                   "audio": "TEXT NOT NULL DEFAULT 'none' CHECK (audio IN ('none','ambient','speech','unknown'))"}}
 

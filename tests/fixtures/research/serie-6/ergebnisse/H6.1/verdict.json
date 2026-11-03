@@ -1,0 +1,12 @@
+{
+ "h": "H6.1",
+ "verdict": "inconclusive",
+ "effect": "log-odds A vs B = -0.10",
+ "ci": "[-0.30, 0.10]",
+ "n": 3000,
+ "robustness": "pre-trend joint p = 0.24",
+ "caveats": "Self-descriptions are a snapshot (synthetic fixture text).",
+ "inputs": ["dataset:47", "dataset:100"],
+ "sample": false,
+ "time": "2026-11-02 22:22"
+}

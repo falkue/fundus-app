@@ -1,0 +1,12 @@
+{
+ "h": "H10.1.1",
+ "verdict": "partly supported",
+ "effect": "slope = 0.009",
+ "ci": "[-0.020, 0.038]",
+ "n": "S1 8077, S2 6990",
+ "robustness": "two checks (fixture)",
+ "caveats": "self-selected respondents (fixture)",
+ "inputs": ["dataset:111 (SO survey)"],
+ "sample": false,
+ "time": "2026-11-02 06:11"
+}
