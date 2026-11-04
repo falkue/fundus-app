@@ -10,7 +10,7 @@ import { el, svgEl, card, emptyNote, segmented, badge, confirmDialog, dl } from 
 import * as fmt from '../lib/fmt.js';
 import { arr, kids, hp, api, cell, sqlDate, VIS, FREQ, DUE, LABELS, badges, periodText, periodYears, loadCatalog, dropCatalog,
   uploadDialog, copyText, tip, hideTip, glyph, compact, put, isText, validity } from './daten-lib.js';
-import { vpill, exploratoryChip } from './forschung-lib.js';
+import { resultPill } from './forschung-lib.js';
 
 const TABS = [
   { value: 'ueberblick', label: 'Überblick' }, { value: 'spalten', label: 'Tabellen und Spalten' }, { value: 'vorschau', label: 'Vorschau' },
@@ -678,7 +678,7 @@ export function render(root, ctx, ref, alive) {
           const isF = String(x.ref ?? '').startsWith('finding:');
           const id = String(x.ref ?? '').split(':')[1] ?? x.id;
           return el('li', el('a', { href: isF ? `#forschung?f=${id}` : `#forschung?h=${id}` }, el('strong', x.code ?? x.ref), ' ', x.title ?? ''),
-            el('div.row', isF ? exploratoryChip() : vpill(x.verdict, { none: 'noch kein Ergebnis' }),
+            el('div.row', isF ? el('span.fo-pill', 'Finding') : resultPill(x.verdict),
               x.version != null && x.version < d.version ? badge(`nutzt Version ${x.version}`, 'warn') : null));
         })) : el('p.small.muted', 'Keine Hypothese und kein Finding nutzt ihn bisher.')));
     }

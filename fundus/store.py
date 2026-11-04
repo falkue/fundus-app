@@ -278,6 +278,8 @@ class Store:
                             "source_url": "TEXT"},
         # column count cache and fixity of dataset files (3 Nov 2026)
         "dataset_file": {"columns_n": "INTEGER", "verified_at": "TEXT", "verified_ok": "INTEGER"},
+        # research registry (3 Nov 2026): an identical result is marked, never deleted
+        "hypothesis_result": {"duplicate_of": "INTEGER"},
         "photo": {"media": "TEXT NOT NULL DEFAULT 'photo' CHECK (media IN ('photo','video'))", "duration": "REAL", "fps": "REAL",
                   "audio": "TEXT NOT NULL DEFAULT 'none' CHECK (audio IN ('none','ambient','speech','unknown'))"}}
 

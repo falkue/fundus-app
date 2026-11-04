@@ -104,6 +104,11 @@ def _strip_id(title: str | None, ident: str | None = None) -> str | None:
 
 
 def _direction(text: str) -> str | None:
+    """Direction of the MAIN claim: with several sign markers ('… peers (+). Stronger after 2022 (+), weaker for … (−).')
+    the first one counts – later ones belong to moderators (3 Nov 2026: H6.47 got the moderator's '−')."""
+    signs = re.findall(r"\((\+|−|–|≠)(?:[,;][^)]*)?\)", text or "")
+    if len(signs) > 1:
+        return {"+": "+", "–": "−", "−": "−", "≠": "≠"}[signs[0]]
     m = re.search(r"\((\+|−|-|–|≠)(?:[,;][^)]*)?\)\s*\.?\s*$", (text or "").strip()) or \
         re.search(r"[Pp]rediction:?\s*\((\+|−|-|–|≠)", text or "") or re.search(r"\(sign\s*(\+|−|-|–)\)", text or "") or re.search(r"\((\+|−|–|≠)(?:,[^)]*)?\)", text or "")
     if not m:
@@ -524,7 +529,8 @@ def run(store: Store, root: str | Path, dry_run: bool = False, actor: str = ACTO
                   "hypotheses": len(imported),
                   "preregs_frozen": store.db.execute("SELECT count(*) FROM hypothesis_prereg p JOIN hypothesis h ON h.id = p.hypothesis_id "
                                                      "WHERE h.source LIKE 'imported:%' AND p.frozen_at IS NOT NULL").fetchone()[0],
-                  "results": store.db.execute("SELECT count(*) FROM hypothesis_result WHERE source LIKE 'imported:%'").fetchone()[0],
+                  "results": store.db.execute("SELECT count(*) FROM hypothesis_result WHERE source LIKE 'imported:%' "
+                                              "AND duplicate_of IS NULL").fetchone()[0],
                   "findings": store.db.execute("SELECT count(*) FROM finding WHERE source LIKE 'imported:%'").fetchone()[0],
                   "imported_partial": store.db.execute("SELECT count(*) FROM hypothesis WHERE source LIKE 'imported:%' "
                                                        "AND imported_partial = 1").fetchone()[0],
@@ -837,6 +843,12 @@ def _add_result(store, rep, h, kw, src, inputs, folder, root, scripts, outputs) 
     if store.db.execute("SELECT 1 FROM hypothesis_result WHERE hypothesis_id = ? AND source = ? AND at = ?",
                         (h["id"], src, kw["at"])).fetchone():
         rep.add("results_unchanged")
+        return False
+    key = R.result_key(h["id"], kw["verdict"], kw.get("effect"), kw.get("estimate"), kw.get("ci_low"), kw.get("ci_high"),
+                       kw.get("n"), kw.get("n_text"), kw.get("sample_run"))
+    if any(R._row_key(r) == key for r in store.db.execute(
+            "SELECT * FROM hypothesis_result WHERE hypothesis_id = ? AND duplicate_of IS NULL", (h["id"],))):
+        rep.add("results_duplicate_skipped")      # the same result exists already (registered via MCP or imported earlier)
         return False
     k = parse_kurz(_read(folder / "kurz.md")) if folder is not None and (folder / "kurz.md").exists() else None
     method_doc = "\n\n".join(k["method"])[:20000] if k and k["method"] else None

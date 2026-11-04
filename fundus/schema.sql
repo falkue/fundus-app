@@ -1196,6 +1196,7 @@ CREATE TABLE IF NOT EXISTS hypothesis_result (
   sample_run    INTEGER NOT NULL DEFAULT 0,   -- 1 = run on a sample / pilot (not the full data)
   partial_data  TEXT,                         -- what was incomplete when it ran
   skipped       INTEGER NOT NULL DEFAULT 0,   -- 1 = not testable at that time (verdict inconclusive)
+  duplicate_of  INTEGER,                      -- set: identical to that result (same content key) – ignored by all readers
   at            TEXT NOT NULL,
   by            TEXT,
   source        TEXT NOT NULL DEFAULT 'registered',   -- registered | imported:<file>

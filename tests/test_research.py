@@ -387,3 +387,104 @@ def test_sidebar_stats(store):
         m.configure(m.DEFAULT_DB)
     assert code == 200 and s["hypotheses"] == 1 and s["findings"] == 1 and s["worklist"] == 1
     assert "board" not in s and len(json.dumps(s)) < 600
+
+
+def test_direction_of_main_claim_not_moderator():
+    """Several sign markers: the first is the main claim (H6.47 got its moderator's '−' at the first import)."""
+    from fundus import research_import as ri
+    assert ri._direction("Hazard rises with peers (+). Stronger after 2022 (+) and weaker for R&D firms (−).") == "+"
+    assert ri._direction("Spanning firms get fewer rounds (−). After 2024 rare patterns outperform (+).") == "−"
+    assert ri._direction("Lower wages adopt faster (+).") == "+"
+
+
+def _prereg_h(store, stmt="Dup test"):
+    if not store.db.execute("SELECT 1 FROM research_series WHERE slug = 'serie-8'").fetchone():
+        _series(store)
+    h = rs.create_hypothesis(store, stmt, series="serie-8", direction="+")
+    rs.preregister(store, h["id"], PREREG)
+    return h
+
+
+def _raw_result(store, hid, verdict="inconclusive", effect="b = 0.1", source="imported:x/verdict.json", at="2026-11-01 10:00:00",
+                n=100):
+    cur = store.db.execute("INSERT INTO hypothesis_result(hypothesis_id, verdict, effect, n, at, source, created_at) "
+                           "VALUES (?,?,?,?,?,?,?)", (hid, verdict, effect, n, at, source, at))
+    store.db.commit()
+    return cur.lastrowid
+
+
+def test_add_result_identical_is_unchanged(store):
+    h = _prereg_h(store)
+    a = rs.add_result(store, h["id"], "supported", effect="b = 0.4", estimate=0.4, ci_low=0.1, ci_high=0.7, n=50)
+    b = rs.add_result(store, h["id"], "supported", effect=" b  =  0.4 ", estimate=0.4000000001, ci_low=0.1, ci_high=0.7, n="50")
+    assert b["unchanged"] is True and "nicht doppelt angelegt" in b["note"] and len(b["results"]) == 1
+    assert b["result"] == a["current_result"]["ref"]
+    c = rs.add_result(store, h["id"], "supported", effect="b = 0.5", estimate=0.5, ci_low=0.2, ci_high=0.8, n=50)
+    assert "unchanged" not in c and len(c["results"]) == 2                  # a real rerun is a new version
+
+
+def test_import_after_mcp_result_and_changed_time_no_duplicate(store, tmp_path):
+    import shutil
+    root = tmp_path / "an"
+    shutil.copytree(FIXTURE / "serie-6", root / "serie-6")
+    ri.run(store, root)
+    hid = rs.hyp_row(store, "H6.1")["id"]
+    n0 = len(rs._results(store, hid))
+    # verdict.json rewritten with a new time but the same content → no second version
+    vf = root / "serie-6/ergebnisse/H6.1/verdict.json"
+    vf.write_text(vf.read_text().replace("2026-11-02 22:22", "2026-11-03 08:00"))
+    rep = ri.run(store, root)
+    assert rep["changes"]["results_duplicate_skipped"] == 1 and len(rs._results(store, hid)) == n0
+    # a session registered the result via MCP first, then the folder is imported
+    store2 = type(store)(tmp_path / "b.sqlite")
+    rs.create_series(store2, "serie-6", "own", source="imported:x")
+    h = rs.create_hypothesis(store2, "registered first", code="H6.1", series="serie-6", direction="+", source="imported:x")
+    rs.preregister(store2, h["id"], PREREG)
+    rs.add_result(store2, h["id"], "inconclusive", effect="log-odds A vs B = -0.10", estimate=-0.10, ci_low=-0.30,
+                  ci_high=0.10, n=3000)
+    rep = ri.run(store2, root)
+    assert rep["changes"]["results_duplicate_skipped"] == 1
+    assert [r["source"] for r in rs._results(store2, h["id"]) if not r["sample_run"]] == ["registered"]
+    store2.close()
+
+
+def test_dedupe_keeper_rules_and_readers(store):
+    # (c) oldest imported
+    h1 = _prereg_h(store, "c")
+    a = _raw_result(store, h1["id"], at="2026-11-01 10:00:00")
+    b = _raw_result(store, h1["id"], at="2026-11-02 10:00:00", source="imported:y/verdict.json")
+    # (b) newest registered
+    h2 = _prereg_h(store, "b")
+    _raw_result(store, h2["id"], at="2026-11-03 10:00:00")
+    r1 = _raw_result(store, h2["id"], at="2026-11-01 10:00:00", source="registered")
+    r2 = _raw_result(store, h2["id"], at="2026-11-02 10:00:00", source="registered")
+    # (a) the one with the newest interpretation – here an old imported one
+    h3 = _prereg_h(store, "a")
+    i_old = _raw_result(store, h3["id"], at="2026-11-01 10:00:00")
+    reg = _raw_result(store, h3["id"], at="2026-11-02 10:00:00", source="registered")
+    newer = _raw_result(store, h3["id"], at="2026-11-03 10:00:00")
+    rs.set_interpretation(store, "result", reg, {"summary": "first"}, author="Falk")
+    rs.set_interpretation(store, "result", i_old, {"summary": "s", "explanation": "e", "limits": "l", "theory": "t"}, author="Falk")
+    assert rs.get_hypothesis(store, h3["id"])["current_result"]["id"] == newer       # before: a duplicate is current
+    dry = rs.dedupe(store)
+    assert dry["groups"] == 3 and dry["duplicates"] == 5 and store.db.execute(
+        "SELECT count(*) FROM hypothesis_result WHERE duplicate_of IS NOT NULL").fetchone()[0] == 0
+    out = rs.dedupe(store, apply=True)
+    keep = {g["code"]: (g["keeper"], g["rule"][0]) for g in out["details"]}
+    assert keep[h1["code"]] == (a, "c") and keep[h2["code"]] == (r2, "b") and keep[h3["code"]] == (i_old, "a")
+    assert out["interpretation_on_duplicate"] == [{"code": h3["code"], "result": reg, "keeper": i_old,
+                                                   "note": "Interpretation an Duplikat"}]
+    assert out["check"] == []
+    g = rs.get_hypothesis(store, h3["id"])
+    assert g["current_result"]["id"] == i_old and g["interpretation_state"] == "complete" and len(g["results"]) == 1
+    assert {d["id"] for d in g["duplicates"]} == {reg, newer} and all(d["duplicate_of"] == i_old for d in g["duplicates"])
+    assert rs.get_hypothesis(store, h1["id"])["duplicates"][0] == {"id": b, "source": "imported:y/verdict.json",
+                                                                    "at": "2026-11-02 10:00:00", "duplicate_of": a}
+    assert rs.stats(store)["results"] == 3 and rs.get_hypothesis(store, h2["id"])["current_result"]["id"] == r2
+    assert r1 in {d["id"] for d in rs.get_hypothesis(store, h2["id"])["duplicates"]}
+    b8 = next(x for x in rs.board(store) if x["slug"] == "serie-8")
+    assert sum(b8["verdicts"].values()) == 3 and b8["interpretation_missing"] == 2
+    assert rs.worklist(store)["counts"]["interpretation_missing"] == 2
+    assert store.db.execute("SELECT count(*) FROM changelog WHERE action = 'duplicate'").fetchone()[0] == 5
+    again = rs.dedupe(store, apply=True)
+    assert again["groups"] == 0 and again["duplicates"] == 0                      # idempotent

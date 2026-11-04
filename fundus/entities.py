@@ -1067,7 +1067,7 @@ def flag_common_words(store: Store, min_lower: int = 3, share: float = 0.2) -> i
     rows = store.db.execute("SELECT entity_id, alias, alias_norm FROM entity_alias WHERE source NOT IN "
                             "('raw','compound','publisher_alias','ambiguous','common_word') AND alias_norm NOT LIKE '% %'").fetchall()
     cand = {an for _, alias, an in rows if not is_abbrev(alias) and alias != alias.lower()
-            and not re.search(r"[a-z][A-Z]", alias)}          # CamelCase names ('MarTech') are never ordinary words
+            and not re.search(r"[a-z][A-Z]", alias)}          # CamelCase names ('DataLake') are never ordinary words
     if not cand:
         return 0
     low, cap = Counter(), Counter()

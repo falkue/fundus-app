@@ -38,7 +38,7 @@ let saved = null;      // GET /api/collections: gespeicherte Suchen (eigener Ber
 let trashN = 0;        // GET /api/trash: Einträge im Papierkorb (Zahl in der Seitenleiste)
 let archiveN = 0;      // GET /api/archive: archivierte Folien (Zahl in der Seitenleiste)
 let receivedNew = 0;   // GET /api/received: neue, noch nicht angenommene Pakete (Zahl in der Seitenleiste)
-let research = null;   // GET /api/research → stats: Hypothesen, Findings, Arbeitsliste (Zahlen in der Seitenleiste)
+let research = null;   // GET /api/research?stats=1 → Zahl der Hypothesen (Seitenleiste)
 
 // ---------------------------------------------------------------- Theme
 const THEME_KEY = 'fundus-theme';
@@ -200,29 +200,21 @@ function buildNav() {
     tree.append(li);
   }
   if (ps.length) nav.append(tree);
-  const group = (label, ...links) => { nav.append(el('span.sidebar__label.nav__group', label)); links.forEach((l) => nav.append(l)); };
+  const group = (label, ...links) => { nav.append(el('span.sidebar__label.nav__group', label)); links.filter(Boolean).forEach((l) => nav.append(l)); };
+  const researchN = (research?.stats ?? research)?.hypotheses ?? null;
   group('Bibliothek',
     el('a.nav__link.nav__link--photos', { href: '#mediathek', title: 'Mediathek: Fotos und Videos der Feldforschung' },
       icon('ic-photo'), el('span', 'Mediathek')),
     el('a.nav__link.nav__link--data', { href: '#daten', title: 'Datensätze für Analysen – gespeichert, beschrieben, abfragbar' },
       icon('ic-table'), el('span', 'Datensätze')),
+    // Forschung: one entry with the number of hypotheses – only when the server knows the research part.
+    // GET /api/research?stats=1 answers {hypotheses, findings, …}; the full board has them under .stats
+    researchN !== null ? el('a.nav__link.nav__link--research', { href: '#forschung', title: 'Forschung: Hypothesen und Findings mit Ergebnis und Interpretation' },
+      icon('ic-flask'), el('span', 'Forschung'), el('span.nav__count', fmt.int(researchN))) : null,
     el('a.nav__link.nav__link--archive', { href: '#archiv', title: 'Archivierte Folien – auffindbar, aber nicht mehr im Projekt gelistet' },
       icon('ic-archive'), el('span', 'Archiv'), archiveN ? el('span.nav__count', fmt.int(archiveN)) : null),
     el('a.nav__link.nav__link--trash', { href: '#papierkorb', title: 'Gelöschte Folien, Foliensätze und Projekte – nach 30 Tagen endgültig weg' },
       icon('ic-trash'), el('span', 'Papierkorb'), trashN ? el('span.nav__count', fmt.int(trashN)) : null));
-  const rs = research?.stats ? { ...research.stats, worklist: research.stats.worklist
-    ?? Object.values(research.worklist?.counts ?? {}).reduce((a, n) => a + (n ?? 0), 0) } : null;
-  // Forschung: Übersicht (mit Arbeitsliste), Hypothesen, Findings – nur wenn der Server den Forschungsteil kennt
-  if (rs) {
-    group('Forschung',
-      el('a.nav__link.nav__link--research', { href: '#forschung', data: { rtab: 'uebersicht' }, title: 'Forschung: Serien, Arbeitsliste, Evidenzkarte' },
-        icon('ic-flask'), el('span', 'Forschung'),
-        rs.worklist ? el('span.nav__count.badge.badge--accent', { title: `${rs.worklist} offene Punkte auf der Arbeitsliste (z. B. Interpretation fehlt)` }, fmt.int(rs.worklist)) : null),
-      el('a.nav__link.nav__link--research', { href: '#forschung?tab=hypothesen', data: { rtab: 'hypothesen' }, title: 'Präregistrierte Hypothesen mit Ergebnis und Interpretation' },
-        icon('ic-hypo'), el('span', 'Hypothesen'), el('span.nav__count', fmt.int(rs.hypotheses ?? 0))),
-      el('a.nav__link.nav__link--research', { href: '#forschung?tab=findings', data: { rtab: 'findings' }, title: 'Explorative Findings – ohne vorherige Hypothese' },
-        icon('ic-finding'), el('span', 'Findings'), el('span.nav__count', fmt.int(rs.findings ?? 0))));
-  }
   group('Austausch',
     el('a.nav__link.nav__link--received', { href: '#erhalten', title: 'Foliensätze, die dir andere Fundus-Installationen geschickt haben' },
       icon('ic-inbox'), el('span', 'Erhaltene Foliensätze'), receivedNew ? el('span.nav__count.badge.badge--accent', { title: `${receivedNew} neu` }, fmt.int(receivedNew)) : null),
@@ -263,13 +255,7 @@ export function syncNav() {
   const inReceived = location.hash.startsWith('#erhalten');
   const inSent = location.hash.startsWith('#gesendet');
   const inResearch = location.hash.startsWith('#forschung');
-  const rq = inResearch ? new URLSearchParams(location.hash.split('?')[1] ?? '') : null;
-  const rtab = !rq ? null : rq.get('h') ? 'hypothesen' : rq.get('f') ? 'findings' : (rq.get('tab') ?? 'uebersicht');
-  document.querySelectorAll('.nav__link--research').forEach((a) => {
-    const on = a.dataset.rtab === rtab;
-    a.classList.toggle('active', on);
-    if (on) a.setAttribute('aria-current', 'page'); else a.removeAttribute('aria-current');
-  });
+  document.querySelector('.nav__link--research')?.classList.toggle('active', inResearch);
   document.querySelector('.nav__link--received')?.classList.toggle('active', inReceived);
   document.querySelector('.nav__link--sent')?.classList.toggle('active', inSent);
   document.querySelector('.nav__link--data')?.classList.toggle('active', inData);
@@ -344,7 +330,7 @@ const idle = () => Date.now() - lastInput > 30000 && !document.hidden && !docume
   && !document.activeElement?.closest?.('input, textarea, select, [contenteditable]');
 const dataSig = () => JSON.stringify([arr(overview?.projects).map((p) => [p.project, p.exhibits, p.versions, p.updated_at, p.archived,
   arr(p.sets).map((x) => [x.id, x.exhibits, x.updated_at])]), fbCounts?.open, fbCounts?.decisions, arr(saved).map((c) => [c.id, c.slides]), trashN, archiveN, receivedNew,
-  research?.stats ? [research.stats.hypotheses, research.stats.findings, research.stats.results, research.stats.interpretations, research.worklist?.counts] : null]);
+  (research?.stats ?? research)?.hypotheses ?? null]);
 let pending = null;   // 'code' | 'data'
 const banner = el('div.upd-banner', { role: 'status', hidden: true });
 document.body.append(banner);

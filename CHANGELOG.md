@@ -3,6 +3,34 @@
 What changed in each public release of Fundus. Updating an existing installation: AGENTS.md, section 10 (back up,
 `git pull`, `pip install -e ".[render]"`, run `fundus stats` once – migrations are additive and automatic).
 
+## 0.2.1 – 4 November 2026
+
+### Research: a calmer, simpler view
+- **One list instead of dashboards.** The sidebar has a single entry "Forschung". Its page is one list of hypotheses and
+  findings with a search field and three filters (type, series, result); everything else sits behind "Weitere Filter".
+  A one-line summary ("… Hypothesen · … mit Ergebnis · … Findings · … ohne Interpretation") doubles as a quick filter.
+  Verdicts appear as plain words in a neutral pill – no colours, no symbols – so a rejected or inconclusive result looks
+  exactly as important as a supported one.
+- **A hypothesis reads like a document** (no tabs): result, interpretation, plan before the analysis ("festgelegt am … –
+  danach nicht mehr änderbar") with its deviations, data, related items; checksums, import source, method and history are
+  folded into "Technische Details". Integrity notes are one plain line instead of warning boxes. Findings follow the same
+  pattern. The evidence map and series overview moved to a secondary page as plain count tables.
+
+### Research registry: fixes
+- **No duplicate results.** A result with the same content as an existing one (same verdict, effect, estimate/interval,
+  n, sample/full run) is no longer created – neither by the importer (also when only the time in `verdict.json` changed or
+  the result was already recorded through MCP) nor by `fundus_hypothesis(action='result')`, which answers
+  `unchanged: true`. Existing duplicates are marked (`duplicate_of`), never deleted, and ignored everywhere;
+  `fundus research dedupe [--apply]` cleans up an existing archive and checks that every interpretation sits on the
+  current result.
+- **Direction of the main claim.** When a statement carries several signs ("… peers (+). Stronger after 2022 (+), weaker
+  for … (−).") the importer takes the first one – the main effect – instead of the last (a moderator). A direction
+  deviation now also updates the direction shown in lists.
+
+### Other fixes
+- The sidebar section "Forschung" was hidden after the small `?stats=1` sidebar response was introduced.
+- Slide search: the year filter counts only slides the search can return (not trashed, archived or section dividers).
+
 ## 0.2.0 – 3 November 2026
 
 ### Optional services: your own language model, Gemini on Vertex AI

@@ -44,9 +44,12 @@ def created_years(store: Store, ids: list[int] | None = None) -> dict[int, int]:
 
 
 def years(store: Store) -> list[dict]:
-    """Creation years with slide counts (for the year filter)."""
+    """Creation years with slide counts (for the year filter) – only slides the search can return: not in the trash, not
+    archived, no section dividers."""
     from collections import Counter
-    c = Counter(created_years(store).values())
+    live = {r[0] for r in store.db.execute("SELECT id FROM exhibit WHERE project != ? AND archived_at IS NULL AND kind != 'section'",
+                                           (ex.TRASH_PROJECT,))}
+    c = Counter(y for i, y in created_years(store).items() if i in live)
     return [{"year": y, "slides": n} for y, n in sorted(c.items(), reverse=True)]
 
 

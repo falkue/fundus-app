@@ -1,180 +1,113 @@
 /**
- * Parts shared by the hypothesis and the finding page: the interpretation editor (seven sections, complete/incomplete,
- * versions), connections (links to hypotheses/findings), theory cards with scholars and works, the change log and the
- * evidence list (quotes with speaker role, photos/videos from the media archive, datasets, documents).
+ * Parts shared by the hypothesis and the finding page (both are plain documents): the interpretation section
+ * (reading view, empty state and the seven-part editor), "Verwandt" (links, theory), the evidence list and the
+ * change log for "Technische Details".
  */
-import { el, card, emptyNote, badge } from '../lib/dom.js';
-import { arr, kids, put, SECTIONS, interpState, interpChip, md, RELATION, vpill, statusChip, refLink, refHref, EVIDENCE, when, day, hypHref, findHref, linkify } from './forschung-lib.js';
+import { el } from '../lib/dom.js';
+import { arr, kids, put, SECTIONS, interpState, md, RELATION, resultPill, refLink, EVIDENCE, when, hypHref, findHref, isFinding, linkify,
+  STATUS } from './forschung-lib.js';
 
-// ---------------------------------------------------------------- interpretation editor
+// ---------------------------------------------------------------- interpretation
 /**
- * interp: current {sections, author, at, version}; history: older versions (newest first, may include current);
- * save(sections) → Promise (rejects with Error). readOnly: e.g. withdrawn items.
+ * The section body: reading view (filled parts with their headings), or an empty state with "Interpretation schreiben".
+ * save(sections) → Promise<new interpretation | null>. readOnly hides the buttons (withdrawn items).
  */
-export function interpretationEditor({ interp, history, save, readOnly, verdict, ctx }) {
-  const root = el('div.fo-ie');
+export function interpretationSection({ interp, save, readOnly, ctx, verdict }) {
+  const box = el('div.fo-interp');
   let current = interp ?? null;
-  let viewing = null;          // older version shown read-only
-  let mode = 'edit';
-  const values = Object.fromEntries(SECTIONS.map((s) => [s.key, current?.sections?.[s.key] ?? '']));
-  const status = el('div.fo-ie__status', { 'aria-live': 'polite' });
-  const saveB = el('button.btn.btn--primary', { type: 'button', disabled: true }, 'Speichern');
-  const resetB = el('button.btn', { type: 'button', disabled: true }, 'Verwerfen');
-  const modeSeg = el('div.seg', { role: 'radiogroup', 'aria-label': 'Ansicht' });
-  const sectionsBox = el('div.fo-ie__sections');
-  const versions = el('div.fo-ie__versions');
-  const dirty = () => SECTIONS.some((s) => (values[s.key] ?? '') !== (current?.sections?.[s.key] ?? ''));
+  const show = () => {
+    const st = interpState(current);
+    if (!st.filled) {
+      put(box, el('div.fo-empty', el('p', 'Noch keine Interpretation.'),
+        el('p.fo-muted', 'Sie erklärt, was das Ergebnis bedeutet, warum es so ausfiel und wo seine Grenzen sind.'),
+        readOnly ? null : el('button.btn.btn--primary', { type: 'button', on: { click: edit } }, 'Interpretation schreiben')));
+      return;
+    }
+    put(box, SECTIONS.filter((s) => String(current.sections?.[s.key] ?? '').trim()).map((s) => el('div.fo-interp__part', el('h3', s.label), md(current.sections[s.key]))),
+      el('p.fo-muted.fo-interp__by', kids(st.complete ? null : `Unvollständig: ${st.need - st.done} von ${st.need} Pflichtteilen fehlen.`,
+        current.author ? `Von ${current.author}` : null, current.at ? when(current.at) : null).join(' · ')),
+      readOnly ? null : el('button.btn', { type: 'button', on: { click: edit } }, 'Bearbeiten'));
+  };
+  const edit = () => put(box, interpretationEditor({ interp: current, ctx, verdict,
+    onCancel: show,
+    save: async (sections) => { const next = await save(sections); current = next ?? { ...(current ?? {}), sections, at: new Date().toISOString() }; show(); return current; } }));
+  show();
+  return box;
+}
 
-  function drawStatus() {
+/** The seven-part editor: a label, a short hint and a text field per part; four parts are needed. */
+export function interpretationEditor({ interp, save, onCancel, ctx, verdict }) {
+  const values = Object.fromEntries(SECTIONS.map((s) => [s.key, interp?.sections?.[s.key] ?? '']));
+  const status = el('span.fo-muted', { 'aria-live': 'polite' });
+  const saveB = el('button.btn.btn--primary', { type: 'button' }, 'Speichern');
+  const cancelB = el('button.btn', { type: 'button', on: { click: () => onCancel?.() } }, 'Abbrechen');
+  const drawStatus = () => {
     const st = interpState({ sections: values });
-    const steps = el('ol.fo-ie__steps', SECTIONS.filter((s) => s.req).map((s) => el('li', { class: String(values[s.key] ?? '').trim() ? 'is-done' : null, title: s.label },
-      el('span.fo-ie__tick', { 'aria-hidden': 'true' }), s.label.split(':')[0])));
-    put(status, interpChip(st.state),
-      el('span.small', `${st.done} von ${st.need} Pflichtteilen`, st.filled > st.done ? `, ${st.filled - st.done} weitere Teile` : '', ' ausgefüllt'),
-      steps,
-      current?.at ? el('span.small.muted.fo-ie__by', `Version ${current.version ?? 1} · ${current.author ?? '–'} · ${when(current.at)}`) : el('span.small.muted.fo-ie__by', 'noch nie gespeichert'),
-      dirty() ? el('span.fo-ie__dirty', 'ungespeicherte Änderungen') : null);
-    saveB.disabled = !dirty() || readOnly;
-    resetB.disabled = !dirty();
-  }
-
-  function drawModes() {
-    put(modeSeg, ...[['edit', 'Bearbeiten'], ['read', 'Lesen']].map(([v, l]) => {
-      const b = el('button.seg__btn', { type: 'button', role: 'radio', 'aria-checked': String(mode === v) }, l);
-      b.addEventListener('click', () => { mode = v; viewing = null; drawModes(); drawSections(); });
-      return b;
-    }));
-  }
-
-  function drawSections() {
-    const src = viewing ? viewing.sections ?? {} : values;
-    const editing = mode === 'edit' && !viewing && !readOnly;
-    put(sectionsBox, viewing ? el('div.alert.alert--info.fo-ie__old', el('span', `Ältere Version ${viewing.version ?? ''} von ${viewing.author ?? '–'}, ${when(viewing.at)} – nur lesen.`),
-      el('button.btn.btn--small', { type: 'button', on: { click: () => { viewing = null; drawSections(); drawVersions(); } } }, 'Zur aktuellen Fassung')) : null,
-    SECTIONS.map((s, i) => {
-      const val = String(src[s.key] ?? '');
-      const filled = !!val.trim();
-      const head = el('div.fo-ie__head', el('span.fo-ie__num', String(i + 1)), el('h4', s.label),
-        s.req ? el('span.fo-ie__req', { class: `fo-ie__req${filled ? ' is-done' : ''}` }, filled ? 'Pflicht · ausgefüllt' : 'Pflicht · fehlt') : el('span.fo-ie__opt', 'optional'));
-      if (!editing) {
-        return el('section.fo-ie__sec', { class: `fo-ie__sec${filled ? '' : ' is-empty'}${s.req ? ' is-req' : ''}` }, head,
-          filled ? md(val) : el('p.small.muted', s.req ? 'fehlt noch' : 'leer'));
-      }
-      const ta = el('textarea.input.fo-ie__ta', { rows: 3, 'aria-label': s.label, placeholder: s.hint, id: `fo-ie-${s.key}` });
-      ta.value = val;
-      const grow = () => { ta.style.height = 'auto'; ta.style.height = `${Math.min(520, ta.scrollHeight + 2)}px`; };
-      ta.addEventListener('input', () => { values[s.key] = ta.value; grow(); drawStatus(); sec.classList.toggle('is-empty', !ta.value.trim()); head.querySelector('.fo-ie__req')?.replaceWith(s.req ? el('span.fo-ie__req', { class: `fo-ie__req${ta.value.trim() ? ' is-done' : ''}` }, ta.value.trim() ? 'Pflicht · ausgefüllt' : 'Pflicht · fehlt') : el('span.fo-ie__opt', 'optional')); });
-      requestAnimationFrame(grow);
-      const sec = el('section.fo-ie__sec', { class: `fo-ie__sec${filled ? '' : ' is-empty'}${s.req ? ' is-req' : ''}` }, head, el('p.fo-ie__hint', s.hint), ta);
-      return sec;
-    }));
-  }
-
-  function drawVersions() {
-    const hs = arr(history).filter((h) => h && h.sections);
-    if (hs.length < 2) { put(versions); return; }
-    put(versions, el('details.fo-ie__vers', el('summary', `${hs.length} Versionen`),
-      el('ul', hs.map((h) => el('li', el('button.btn.btn--ghost.btn--small', { type: 'button', on: { click: () => { viewing = (h.version === current?.version) ? null : h; mode = 'read'; drawModes(); drawSections(); } } },
-        `Version ${h.version ?? '?'}`), el('span.small.muted', ` ${h.author ?? '–'} · ${when(h.at)} · ${interpState(h).done} von ${interpState(h).need} Pflichtteilen`))))));
-  }
-
+    status.textContent = st.complete ? 'Alle Pflichtteile ausgefüllt.' : `${st.done} von ${st.need} Pflichtteilen ausgefüllt.`;
+  };
+  const parts = SECTIONS.map((s) => {
+    const ta = el('textarea.input.fo-ed__ta', { rows: 3, id: `fo-ie-${s.key}`, 'aria-label': s.label });
+    ta.value = values[s.key];
+    const grow = () => { ta.style.height = 'auto'; ta.style.height = `${Math.min(480, ta.scrollHeight + 2)}px`; };
+    ta.addEventListener('input', () => { values[s.key] = ta.value; grow(); drawStatus(); });
+    requestAnimationFrame(grow);
+    return el('div.fo-ed__part', el('label', { for: `fo-ie-${s.key}` }, s.label, s.req ? el('span.fo-muted', ' · Pflicht') : null), el('p.fo-muted.fo-ed__hint', s.hint), ta);
+  });
   saveB.addEventListener('click', async () => {
     saveB.disabled = true;
-    const sections = Object.fromEntries(SECTIONS.map((s) => [s.key, String(values[s.key] ?? '').trim()]));
     try {
-      const next = await save(sections);
-      current = next ?? { ...current, sections, version: (current?.version ?? 0) + 1, at: new Date().toISOString() };
-      for (const s of SECTIONS) values[s.key] = current.sections?.[s.key] ?? '';
-      ctx?.toast(interpState(current).complete ? 'Interpretation gespeichert – vollständig.' : 'Interpretation gespeichert – noch unvollständig.');
-      drawStatus(); drawSections(); drawVersions();
-    } catch (e) { ctx?.toast(`Nicht gespeichert: ${e.message}`, 6000); drawStatus(); }
+      await save(Object.fromEntries(SECTIONS.map((s) => [s.key, String(values[s.key] ?? '').trim()])));
+      ctx?.toast('Interpretation gespeichert.');
+    } catch (e) { saveB.disabled = false; ctx?.toast(`Nicht gespeichert: ${e.message}`, 6000); }
   });
-  resetB.addEventListener('click', () => { for (const s of SECTIONS) values[s.key] = current?.sections?.[s.key] ?? ''; drawStatus(); drawSections(); });
-
-  const lessons = verdict === 'not_supported' || verdict === 'inconclusive'
-    ? el('p.small.fo-ie__lesson', verdict === 'inconclusive' ? 'Unentschiedene Ergebnisse sind Ergebnisse: Was wissen wir jetzt, das wir vorher nicht wussten? Wie breit ist das Intervall, welche Stichprobe bräuchte es? War die Messung gültig?'
-      : 'Nicht gestützte Ergebnisse sind gleich wichtig wie gestützte: Was widerlegt das Ergebnis, was nicht? War die Messung gültig, reichte die Präzision?') : null;
-  if (readOnly) mode = 'read';
-  drawModes(); drawStatus(); drawSections(); drawVersions();
-  put(root, el('div.fo-ie__bar', status, el('div.row.fo-ie__actions', modeSeg, readOnly ? null : resetB, readOnly ? null : saveB)), lessons, sectionsBox, versions);
-  return root;
+  drawStatus();
+  const lesson = verdict === 'not_supported' || verdict === 'inconclusive'
+    ? el('p.fo-muted', 'Auch ein nicht gestütztes oder unentschiedenes Ergebnis ist ein Ergebnis: Was wissen wir jetzt, was wir vorher nicht wussten?') : null;
+  return el('div.fo-ed', lesson, parts, el('div.fo-ed__bar', saveB, cancelB, status));
 }
 
-// ---------------------------------------------------------------- connections and theory cards
-export function linksCard(links, opts = {}) {
-  const ls = arr(links);
-  const groups = new Map();
-  for (const l of ls) {
-    const dir = l.direction === 'in' ? 'in' : 'out';
-    const label = RELATION[l.relation]?.[dir] ?? l.relation;
-    if (!groups.has(label)) groups.set(label, []);
-    groups.get(label).push(l);
-  }
-  const item = (l) => {
-    const isF = (l.type ?? (String(l.ref ?? '').startsWith('finding') ? 'finding' : 'hypothesis')) === 'finding';
-    const href = isF ? findHref(l) : hypHref(l);
-    return el('li.fo-link', el('a', { href }, el('strong', l.code ?? (isF ? `Finding ${l.id}` : `Hypothese ${l.id}`)), ' ', l.title ?? ''),
-      el('span.fo-link__meta', isF ? el('span.fo-explo.fo-explo--small', 'explorativ') : null, l.verdict ? vpill(l.verdict) : l.status ? statusChip(l.status) : null));
-  };
-  return card({ title: 'Verbindungen', accent: 'Verbindungen', sub: opts.sub ?? 'Schärft, repliziert, widerspricht, erweitert, konkurriert – und woraus etwas entstanden ist.' },
-    ls.length ? el('div.fo-links', [...groups].map(([label, items]) => el('div.fo-links__grp', el('span.label', label), el('ul.fo-links__list', items.map(item)))))
-      : el('p.small.muted', 'Noch keine Verbindungen.'));
+// ---------------------------------------------------------------- Verwandt
+/** Links to other hypotheses and findings, plus the theory the item is anchored in. */
+export function relatedList({ links, theories, extra }) {
+  const items = arr(links).map((l) => {
+    const label = RELATION[l.relation]?.[l.direction === 'in' ? 'in' : 'out'] ?? l.relation_label ?? l.relation;
+    const f = isFinding(l);
+    return el('li', el('span.fo-muted', `${label} `), el('a', { href: f ? findHref(l) : hypHref(l) }, kids(l.code, l.title).join(' – ')),
+      f ? el('span.fo-muted', ' · Finding') : l.verdict ? el('span.fo-muted', ` · ${resultPill(l.verdict).textContent}`) : l.status ? el('span.fo-muted', ` · ${STATUS[l.status] ?? l.status}`) : null);
+  });
+  const th = arr(theories).map((t) => el('li', el('span.fo-muted', 'Theorie '), t.name ?? t.id,
+    arr(t.scholars).length ? el('span.fo-muted', ` · ${arr(t.scholars).map((s) => s.name ?? s).join('; ')}`) : null));
+  const all = [...arr(extra), ...items, ...th];
+  return all.length ? el('ul.fo-list', all) : el('p.fo-muted', 'Keine Verbindungen.');
 }
 
-export function theoryCards(theories) {
-  const ts = arr(theories);
-  if (!ts.length) return card({ title: 'Theorie', accent: 'Theorie' }, el('p.small.muted', 'Keine Theorie verknüpft.'));
-  return el('div.fo-theories', ts.map((t) => el('section.card.fo-theory',
-    el('span.label', 'Theorie'),
-    el('h4.fo-theory__name', t.name ?? t.id),
-    t.claim ? el('p.fo-theory__claim', t.claim) : null,
-    arr(t.scholars).length ? el('ul.fo-theory__sch', arr(t.scholars).map((s) => el('li', el('strong', s.name),
-      arr(s.works).length ? el('ul', arr(s.works).map((w) => el('li', w.title, w.doi ? el('span', ' · ', el('a', { href: `https://doi.org/${w.doi}`, target: '_blank', rel: 'noopener' }, `DOI ${w.doi}`)) : null))) : null))) : null)));
-}
-
-// ---------------------------------------------------------------- change log
-const ACTION = { create: 'erfasst', prereg: 'präregistriert (eingefroren)', start: 'Analyse begonnen', deviate: 'Abweichung erfasst', result: 'Ergebnis erfasst',
-  interpret: 'Interpretation gespeichert', link: 'verknüpft', withdraw: 'zurückgezogen', revise: 'überarbeitet', evidence: 'Beleg ergänzt', derive: 'Hypothese abgeleitet',
-  update: 'geändert', import: 'importiert' };
-export function logList(log) {
-  const ls = arr(log).slice().sort((a, b) => String(b.at ?? b.ts ?? '').localeCompare(String(a.at ?? a.ts ?? '')));
-  if (!ls.length) return emptyNote('Noch keine Einträge.');
-  return el('ol.fo-log', ls.map((e) => el('li',
-    el('span.fo-log__ts', when(e.at ?? e.ts)),
-    el('span.fo-log__what', el('strong', ACTION[e.action] ?? e.action ?? '–'), e.detail ? el('span', ' – ', ...linkify(e.detail)) : null),
-    el('span.fo-log__by', e.by ?? e.actor ?? ''))));
-}
-
-// ---------------------------------------------------------------- evidence
-export function evidenceList(items, opts = {}) {
+// ---------------------------------------------------------------- evidence (findings)
+export function evidenceList(items) {
   const ev = arr(items);
-  if (!ev.length) return emptyNote(opts.empty ?? 'Noch keine Belege.');
+  if (!ev.length) return el('p.fo-muted', 'Noch keine Belege.');
   const quotes = ev.filter((e) => e.kind === 'quote');
   const media = ev.filter((e) => e.kind === 'photo' || e.kind === 'video');
   const rest = ev.filter((e) => !['quote', 'photo', 'video'].includes(e.kind));
   return el('div.fo-ev',
-    quotes.length ? el('section.fo-ev__grp', el('h4', `Zitate (${quotes.length})`), el('p.small.muted', 'Wörtlich, nur mit Rolle der sprechenden Person – nie mit Namen.'),
-      el('div.fo-quotes', quotes.map((q) => el('figure.fo-quote', el('blockquote', `„${String(q.quote ?? q.text ?? '').replace(/^[„"]|[“"]$/g, '')}“`),
-        el('figcaption', el('span.fo-quote__who', q.speaker ?? q.role ?? 'Rolle nicht angegeben'), q.note ? el('span.small.muted', ` · ${q.note}`) : null))))) : null,
-    media.length ? el('section.fo-ev__grp', el('h4', `Fotos und Videos (${media.length})`), el('div.fo-media', media.map(mediaItem))) : null,
-    rest.length ? el('section.fo-ev__grp', opts.plain ? null : el('h4', `Weitere Belege (${rest.length})`), el('ul.fo-evlist', rest.map((e) => el('li',
-      el('span.fo-evlist__kind', EVIDENCE[e.kind] ?? e.kind),
-      el('span.fo-evlist__ref', e.ref ? refLink(e.ref, `${e.ref}${e.version ? ` v${e.version}` : ''}`) : '–', e.title ? el('span', ` ${e.title}`) : null),
-      e.note ? el('span.small.muted.fo-evlist__note', e.note) : null)))) : null);
+    quotes.map((q) => el('figure.fo-quote', el('blockquote', `„${String(q.quote ?? q.text ?? '').replace(/^[„"]|[“"]$/g, '')}“`),
+      el('figcaption.fo-muted', kids(q.speaker ?? 'Rolle nicht angegeben', q.note).join(' · ')))),
+    media.length ? el('div.fo-media', media.map(mediaItem)) : null,
+    rest.length ? el('ul.fo-list', rest.map((e) => el('li', el('span.fo-muted', `${EVIDENCE[e.kind] ?? e.kind} `),
+      e.kind === 'file' ? el('span', fileName(e.ref)) : refLink(e.ref, kids(e.ref, e.title).join(' – ')),
+      e.version ? el('span.fo-muted', ` · Version ${e.version}`) : null,
+      e.note && e.kind !== 'file' ? el('span.fo-muted', ` · ${e.note}`) : null))) : null);
 }
+const fileName = (p) => String(p ?? '').split('/').pop();
 
-/** Photo or video from the media archive: picture from the evidence item or, if missing, from /api/photos/<id>. */
+/** Photo or video from the media archive: picture from the item or, if missing, from /api/photos/<id>. */
 function mediaItem(e) {
   const id = String(e.ref ?? '').split(':')[1];
   const img = el('img', { alt: e.note ?? e.ref ?? '', loading: 'lazy', decoding: 'async' });
-  const link = el('a.fo-media__img', { target: '_blank', rel: 'noopener', title: 'Grösser öffnen' }, img,
-    e.kind === 'video' ? el('span.fo-media__play', { 'aria-hidden': 'true' }, '▶') : null);
-  const fig = el('figure.fo-media__item', link,
-    el('figcaption', el('span.fo-evlist__kind', EVIDENCE[e.kind]), ' ', el('span.fo-ref', e.ref ?? ''), e.note ? el('div.small', e.note) : null));
+  const link = el('a.fo-media__img', { target: '_blank', rel: 'noopener', title: 'Grösser öffnen' }, img);
+  const fig = el('figure.fo-media__item', link, el('figcaption.fo-muted', kids(EVIDENCE[e.kind], e.note).join(' · ')));
   const setUrls = (p) => {
     if (p?.thumb_url) img.src = p.thumb_url; else fig.classList.add('is-missing');
     link.href = p?.view_url ?? p?.thumb_url ?? '#';
-    if (p?.title && !e.note) img.alt = p.title;
   };
   if (e.thumb_url) setUrls(e);
   else if (id) fetch(`/api/photos/${id}`, { cache: 'no-store' }).then((r) => (r.ok ? r.json() : null)).then(setUrls).catch(() => setUrls(null));
@@ -182,8 +115,19 @@ function mediaItem(e) {
   return fig;
 }
 
-// ---------------------------------------------------------------- small facts grid
-export function facts(items) {
-  return el('dl.fo-facts', kids(...items).filter(([, v]) => v !== undefined).map(([k, v]) => el('div', el('dt', k), el('dd', v === null || v === '' ? '–' : v))));
+// ---------------------------------------------------------------- change log (Technische Details)
+const ACTION = { create: 'erfasst', prereg: 'Plan festgelegt', start: 'Auswertung begonnen', deviate: 'Abweichung festgehalten', result: 'Ergebnis abgelegt',
+  interpret: 'Interpretation gespeichert', link: 'verknüpft', withdraw: 'zurückgezogen', revise: 'überarbeitet', evidence: 'Beleg ergänzt', derive: 'Hypothese abgeleitet',
+  update: 'geändert', import: 'importiert' };
+export function logList(log) {
+  const ls = arr(log).slice().sort((a, b) => String(b.at ?? '').localeCompare(String(a.at ?? '')));
+  if (!ls.length) return el('p.fo-muted', 'Keine Einträge.');
+  return el('ul.fo-list.fo-log', ls.slice(0, 60).map((e) => el('li', el('span.fo-muted', `${when(e.at)} · `), ACTION[e.action] ?? e.action ?? '–',
+    e.by ? el('span.fo-muted', ` · ${e.by}`) : null)));
 }
-export { day, refHref, badge };
+
+/** Calm definition list; rows without a value are left out. */
+export function defs(rows) {
+  const r = rows.filter(([, v]) => v !== null && v !== undefined && v !== '' && !(Array.isArray(v) && !v.length));
+  return el('dl.fo-dl', r.map(([k, v]) => el('div', el('dt', k), el('dd', typeof v === 'string' ? el('span', ...linkify(v)) : v))));
+}

@@ -1,14 +1,14 @@
 /**
- * Shared building blocks of the "Forschung" view (forschung*.js): API calls, German labels, verdict marks and bars
- * (four verdicts with equal visual weight: own hue AND own shape, no good/bad colouring), status chips, a small
- * markdown renderer (DOM only, no innerHTML), links for Fundus references (dataset:N, photo:N, hypothesis:N …) and a
- * responsive SVG helper that redraws on width changes.
+ * Shared building blocks of the "Forschung" view (forschung*.js): API calls, German labels in plain words, the neutral
+ * result pill (every verdict looks the same – no colours, no shapes), a small markdown renderer (DOM only, no
+ * innerHTML), links for Fundus references (dataset:N, hypothesis:N …), normalizers from the server shapes and a
+ * responsive SVG helper for the small interval plot.
  *
- * REST (fundus/research.py via mcp_server): GET /api/research (board, worklist, evidence map),
- * GET /api/research/hypotheses?…, /api/research/hypotheses/<id>, GET /api/research/findings?…, /api/research/findings/<id>,
+ * REST (fundus/research.py via mcp_server, see RESEARCH-API-NOTES.md): GET /api/research, /api/research/series,
+ * /api/research/hypotheses?…, /api/research/hypotheses/<id>, /api/research/findings?…, /api/research/findings/<id>;
  * POST /api/research/hypotheses/<id> | /api/research/findings/<id> {action, …}.
  */
-import { el, svgEl, badge } from '../lib/dom.js';
+import { el } from '../lib/dom.js';
 import * as fmt from '../lib/fmt.js';
 
 export const arr = (v) => (Array.isArray(v) ? v : []);
@@ -25,52 +25,40 @@ export async function api(path, body) {
   return d;
 }
 
-// ---------------------------------------------------------------- labels
+// ---------------------------------------------------------------- labels (plain German)
 export const VERDICTS = ['supported', 'partly_supported', 'not_supported', 'inconclusive'];
 export const VERDICT = { supported: 'gestützt', partly_supported: 'teilweise gestützt', not_supported: 'nicht gestützt', inconclusive: 'unentschieden' };
-export const VERDICT_SHORT = { supported: 'gestützt', partly_supported: 'teilweise', not_supported: 'nicht gestützt', inconclusive: 'unentschieden' };
-export const STATUS = { idea: 'Idee', preregistered: 'präregistriert', running: 'läuft', result: 'Ergebnis', revised: 'überarbeitet', withdrawn: 'zurückgezogen' };
-export const BOARD = ['idea', 'preregistered', 'running', 'result'];
+export const STATUS = { idea: 'Idee', preregistered: 'Plan festgelegt', running: 'in Arbeit', result: 'Ergebnis', revised: 'überarbeitet', withdrawn: 'zurückgezogen' };
 export const KIND = { quantitative: 'quantitativ', qualitative: 'qualitativ', mixed: 'gemischt' };
-export const DIRECTION = { '+': 'positiv (+)', '-': 'negativ (−)', '−': 'negativ (−)', '≠': 'ungleich null (≠)', none: 'ohne Richtung', qualitative: 'qualitativ, ohne Richtung' };
+export const DIRECTION = { '+': 'positiver Zusammenhang erwartet', '-': 'negativer Zusammenhang erwartet', '−': 'negativer Zusammenhang erwartet',
+  '≠': 'ein Unterschied erwartet (Richtung offen)', none: 'ohne Richtung', qualitative: 'qualitativ, ohne Richtung' };
 export const STRENGTH = ['single_observation', 'recurring_pattern', 'saturated', 'quantified'];
-export const STRENGTH_LABEL = { single_observation: 'Einzelbeobachtung', recurring_pattern: 'wiederkehrendes Muster', saturated: 'gesättigt', quantified: 'quantifiziert' };
+export const STRENGTH_LABEL = { single_observation: 'Einzelbeobachtung', recurring_pattern: 'wiederkehrendes Muster', saturated: 'gesättigt', quantified: 'mit Zahlen belegt' };
 export const FSTATUS = { draft: 'Entwurf', recorded: 'erfasst', revised: 'überarbeitet', withdrawn: 'zurückgezogen' };
-export const TIMING = { before_analysis: 'vor der Analyse', after_data_seen: 'nach Sicht auf die Daten' };
+export const TIMING = { before_analysis: 'vor der Auswertung', after_data_seen: 'nach Blick in die Daten' };
 export const EVIDENCE = { dataset: 'Datensatz', observation: 'Beobachtung', document: 'Dokument', exhibit: 'Folie', photo: 'Foto', video: 'Video',
   quote: 'Zitat', note: 'Notiz', file: 'Datei' };
 /** Relation labels from the point of view of the page that shows the link (out = this → other, in = other → this). */
 export const RELATION = {
-  sharpens: { out: 'schärft', in: 'wird geschärft von' }, replicates: { out: 'repliziert', in: 'wird repliziert von' },
+  sharpens: { out: 'schärft', in: 'wird geschärft von' }, replicates: { out: 'wiederholt', in: 'wird wiederholt von' },
   contradicts: { out: 'widerspricht', in: 'widerspricht' }, extends: { out: 'erweitert', in: 'wird erweitert von' },
   derived_from: { out: 'entstanden aus', in: 'Grundlage für' }, competes_with: { out: 'konkurriert mit', in: 'konkurriert mit' },
   revises: { out: 'überarbeitet', in: 'überarbeitet durch' },
 };
 export const PREREG_FIELDS = [
-  ['statement', 'Aussage'], ['direction', 'Richtung'], ['unit', 'Untersuchungseinheit'], ['sample', 'Stichprobe'],
-  ['measures', 'Operationalisierung und Messung'], ['data', 'Daten und Material'], ['method', 'Methode und Modell'], ['controls', 'Kontrollen'],
-  ['decision_rule', 'Entscheidungsregel'], ['robustness_plan', 'Robustheitsplan']];
-export const FLAG = {
-  interpretation_missing: 'Interpretation fehlt', data_newer_than_result: 'Daten neuer als Ergebnis',
-  prereg_after_result: 'Präregistrierung nach dem Ergebnis datiert', idea_without_prereg: 'Idee ohne Präregistrierung', imported_partial: 'nur teilweise importiert',
-};
+  ['statement', 'Aussage'], ['direction', 'Erwartung'], ['unit', 'Untersucht werden'], ['sample', 'Stichprobe'],
+  ['measures', 'Messung'], ['data', 'Daten'], ['method', 'Methode'], ['controls', 'Kontrollen'],
+  ['decision_rule', 'Wann gilt sie als gestützt?'], ['robustness_plan', 'Gegenproben']];
 
-/** The seven interpretation sections; `req` = needed for "complete" (spec: summary, explanation, limits, theory). */
+/** The seven interpretation sections; `req` = needed for "vorhanden" (summary, explanation, limits, theory). */
 export const SECTIONS = [
-  { key: 'summary', label: 'Was das Ergebnis sagt', req: true,
-    hint: 'In zwei, drei Sätzen: Richtung, Grösse und Sicherheit des Ergebnisses – auch wenn es nicht gestützt oder unentschieden ist.' },
-  { key: 'explanation', label: 'Warum es so ausfiel', req: true,
-    hint: 'Mechanismus oder Gründe. Bei nicht gestützten oder unentschiedenen Ergebnissen: Was haben wir gelernt? Reichte die Präzision (Stichprobe, Breite des Intervalls)?' },
-  { key: 'alternatives', label: 'Andere Erklärungen', req: false,
-    hint: 'Welche anderen Mechanismen, Verzerrungen oder Zufälle erklären dasselbe Muster?' },
-  { key: 'limits', label: 'Grenzen: Identifikation, Daten, Messung', req: true,
-    hint: 'Was die Aussage einschränkt: kausale Identifikation, Datenqualität, Gültigkeit der Messung, Übertragbarkeit.' },
-  { key: 'theory', label: 'Bedeutung für die Theorie', req: true,
-    hint: 'Stützt, begrenzt oder widerlegt das Ergebnis die Theorie? Unter welchen Bedingungen gilt sie?' },
-  { key: 'relations', label: 'Bezug zu anderen Hypothesen und Findings', req: false,
-    hint: 'Bestätigt, widerspricht oder schärft es andere? Codes nennen (z. B. H8.2, F-1) – Verbindungen zusätzlich unter „Verbindungen“.' },
-  { key: 'next', label: 'Nächste Schritte', req: false,
-    hint: 'Anschlusshypothesen, bessere Daten, Replikation.' },
+  { key: 'summary', label: 'Was das Ergebnis sagt', req: true, hint: 'Zwei, drei Sätze: Richtung, Grösse und Sicherheit – auch wenn es nicht gestützt oder unentschieden ist.' },
+  { key: 'explanation', label: 'Warum es so ausfiel', req: true, hint: 'Gründe. Bei nicht gestützten oder unentschiedenen Ergebnissen: Was haben wir gelernt? Reichten die Daten?' },
+  { key: 'alternatives', label: 'Andere Erklärungen', req: false, hint: 'Was könnte dasselbe Muster sonst erklären?' },
+  { key: 'limits', label: 'Grenzen', req: true, hint: 'Was die Aussage einschränkt: Ursache und Wirkung, Datenqualität, Messung, Übertragbarkeit.' },
+  { key: 'theory', label: 'Bedeutung für die Theorie', req: true, hint: 'Stützt, begrenzt oder widerlegt das Ergebnis die Theorie?' },
+  { key: 'relations', label: 'Bezug zu anderen Hypothesen und Findings', req: false, hint: 'Bestätigt, widerspricht oder schärft es andere? Codes nennen, z. B. H8.2.' },
+  { key: 'next', label: 'Nächste Schritte', req: false, hint: 'Anschlussfragen, bessere Daten, Wiederholung.' },
 ];
 export function interpState(interp) {
   const s = interp?.sections ?? {};
@@ -79,55 +67,12 @@ export function interpState(interp) {
   const need = SECTIONS.filter((x) => x.req).length;
   return { done, need, filled, complete: done === need, state: done === need ? 'complete' : filled ? 'partial' : 'missing' };
 }
+/** "vorhanden" only when the four required parts are filled; a started one says "unvollständig". */
+export const interpWord = (state) => (state === 'complete' ? 'vorhanden' : state === 'partial' || state === 'incomplete' ? 'unvollständig' : 'fehlt');
 
-// ---------------------------------------------------------------- verdict marks (shape + hue + word)
-const SHAPES = {
-  supported: () => svgEl('circle', { cx: 6, cy: 6, r: 4.9 }),
-  partly_supported: () => svgEl('rect', { x: 1.6, y: 1.6, width: 8.8, height: 8.8, rx: 1.2 }),
-  not_supported: () => svgEl('path', { d: 'M6 0.6 L11.4 6 L6 11.4 L0.6 6 Z' }),
-  inconclusive: () => svgEl('path', { d: 'M6 0.9 L10.6 3.45 V8.55 L6 11.1 L1.4 8.55 V3.45 Z' }),
-  finding: () => svgEl('circle', { cx: 6, cy: 6, r: 4.2, class: 'fo-ring' }),
-  open: () => svgEl('circle', { cx: 6, cy: 6, r: 4.2, class: 'fo-ring fo-ring--solid' }),
-};
-export function vmark(v, cls = '') {
-  const k = SHAPES[v] ? v : 'open';
-  const s = svgEl('svg', { class: `fo-vm fo-v--${k} ${cls}`.trim(), viewBox: '0 0 12 12', 'aria-hidden': 'true', focusable: 'false' });
-  s.append(SHAPES[k]());
-  return s;
-}
-/** Verdict pill: shape + word, tinted with the verdict hue (all four equally strong). */
-export function vpill(v, opts = {}) {
-  if (!v) return el('span.fo-vpill.fo-vpill--none', opts.none ?? 'noch kein Ergebnis');
-  return el('span.fo-vpill', { class: `fo-vpill fo-v--${v}${opts.big ? ' fo-vpill--big' : ''}` }, vmark(v), VERDICT[v] ?? v);
-}
-export function statusChip(s) { return el('span.fo-status', { class: `fo-status fo-status--${s}` }, STATUS[s] ?? s); }
-export function kindChip(k) { return el('span.fo-chip', KIND[k] ?? k); }
-export function visChip(v) { return v === 'internal' ? badge('intern', 'outline') : v === 'public' ? badge('öffentlich', 'accent') : null; }
-export function exploratoryChip() { return el('span.fo-explo', { title: 'Findings sind Ergebnisse ohne vorherige Hypothese. Sie bleiben explorativ und werden nie zu bestätigten Hypothesen.' }, 'explorativ'); }
-/** short: only the state word (for a table column headed „Interpretation“). */
-export function interpChip(state, short = false) {
-  const p = short ? '' : 'Interpretation ';
-  if (state === 'complete') return el('span.fo-ip.fo-ip--complete', { title: 'Alle Pflichtteile der Interpretation sind ausgefüllt' }, `${p}vollständig`);
-  if (state === 'partial' || state === 'incomplete') return el('span.fo-ip.fo-ip--partial', { title: 'Interpretation unvollständig: Pflichtteile fehlen noch' }, `${p}unvollständig`);
-  return el('span.fo-ip.fo-ip--missing', { title: 'Noch keine Interpretation – steht auf der Arbeitsliste' }, `${p}fehlt`);
-}
-
-/** Stacked verdict bar with counts: equal hues, in fixed order; zero segments left out. */
-export function verdictBar(counts, opts = {}) {
-  const total = VERDICTS.reduce((a, v) => a + (counts?.[v] ?? 0), 0);
-  const bar = el('div.fo-vbar', { role: 'img', 'aria-label': total ? VERDICTS.map((v) => `${VERDICT[v]} ${counts?.[v] ?? 0}`).join(', ') : 'noch keine Ergebnisse' });
-  if (!total) { bar.classList.add('is-empty'); bar.append(el('span.fo-vbar__empty', 'noch keine Ergebnisse')); return bar; }
-  for (const v of VERDICTS) {
-    const n = counts?.[v] ?? 0;
-    if (!n) continue;
-    const seg = el(opts.href ? 'a.fo-vbar__seg' : 'span.fo-vbar__seg', { class: `fo-vbar__seg fo-v--${v}`, style: { flexGrow: String(n) },
-      title: `${VERDICT[v]}: ${n} von ${total}`, href: opts.href ? opts.href(v) : null }, el('span.fo-vbar__n', String(n)));
-    bar.append(seg);
-  }
-  return bar;
-}
-export function verdictLegend(counts) {
-  return el('div.fo-vlegend', VERDICTS.map((v) => el('span.fo-vlegend__item', vmark(v), VERDICT[v], counts ? el('span.fo-vlegend__n', fmt.int(counts[v] ?? 0)) : null)));
+/** The result as plain text in a small neutral pill – all verdicts look the same. */
+export function resultPill(verdict, none = 'noch kein Ergebnis') {
+  return el('span.fo-pill', { class: `fo-pill${verdict ? '' : ' fo-pill--none'}` }, verdict ? (VERDICT[verdict] ?? verdict) : none);
 }
 
 // ---------------------------------------------------------------- references → links
@@ -156,10 +101,13 @@ export function linkify(text) {
   if (last < s.length) out.push(s.slice(last));
   return out;
 }
-export const hypHref = (h, tab) => `#forschung?h=${h.id ?? h}${tab ? `&t=${tab}` : ''}`;
-export const findHref = (f, tab) => `#forschung?f=${f.id ?? f}${tab ? `&t=${tab}` : ''}`;
-export const itemHref = (x, tab) => ((x.type ?? (String(x.ref ?? '').startsWith('finding:') ? 'finding' : 'hypothesis')) === 'finding' ? findHref(x, tab) : hypHref(x, tab));
-export const seriesLabel = (s) => (!s ? 'ohne Serie' : typeof s === 'string' ? s.replace(/^serie-/, 'Serie ') : (s.slug ? s.slug.replace(/^serie-/, 'Serie ') : s.title));
+export const hypHref = (h) => `#forschung?h=${h.id ?? h}`;
+export const findHref = (f) => `#forschung?f=${f.id ?? f}`;
+export const isFinding = (x) => (x.type ?? (String(x.ref ?? '').startsWith('finding:') ? 'finding' : 'hypothesis')) === 'finding';
+export const itemHref = (x) => (isFinding(x) ? findHref(x) : hypHref(x));
+/** "Serie 8" for numbered series; a series object without a number shows its title. */
+export const seriesLabel = (s) => (!s ? 'ohne Serie' : typeof s === 'string' ? s.replace(/^serie-/, 'Serie ')
+  : /^serie-\d/.test(s.slug ?? '') ? s.slug.replace(/^serie-/, 'Serie ') : (s.title ?? s.slug));
 
 // ---------------------------------------------------------------- minimal markdown (paragraphs, lists, headings, code, **bold**, `code`, links)
 function inline(text) {
@@ -220,7 +168,6 @@ export function num(v) {
   const s = nfs(a >= 100 ? 0 : a >= 10 ? 1 : a >= 1 ? 2 : 3).format(v);
   return v < 0 ? s.replace('-', '−') : s;
 }
-export const shortHash = (h) => (h ? `${String(h).slice(0, 8)}…${String(h).slice(-4)}` : '–');
 export const when = (v) => fmt.dateTime(sqlDate(v));
 export const day = (v) => fmt.date(sqlDate(v));
 
@@ -252,17 +199,6 @@ export function hay(...parts) { return parts.flat(Infinity).filter(Boolean).join
 const SEC_KEYS = SECTIONS.map((s) => s.key);
 /** Items of a list/search response ({items} or {hypotheses:[…]}). */
 export const listItems = (d, kind) => (Array.isArray(d?.[kind]) ? d[kind] : arr(d?.items));
-/** A flag detail (string, list of fields or list of stale inputs) as one line of text. */
-export function flagText(f) {
-  const d = f?.detail;
-  if (d === null || d === undefined || d === '') return '';
-  if (typeof d === 'string') return d === f.label ? '' : d;
-  if (Array.isArray(d)) {
-    return d.map((x) => (typeof x === 'string' ? (PREREG_FIELDS.find(([k]) => k === x)?.[1] ?? x)
-      : x.ref ? `${x.ref} Version ${x.used ?? '?'} → ${x.current ?? '?'}` : JSON.stringify(x))).join(', ');
-  }
-  return typeof d === 'object' ? Object.entries(d).map(([k, v]) => `${k}: ${typeof v === 'object' ? JSON.stringify(v) : v}`).join(', ') : String(d);
-}
 function interpOf(block) {
   // result.interpretation / finding.interpretation: {state, current {sections…, author, at}, versions [{id, author, at, state}]}
   if (!block) return { interp: null, versions: [], state: 'missing' };
@@ -342,20 +278,11 @@ export function normFinding(f) {
   return f;
 }
 
-/** GET /api/research → {stats, series, worklist, evidence_map: {rows}} (also accepts the earlier fixture shape). */
+/** GET /api/research → {series (from board), evidence_map: {rows}} for the overview page. */
 export function normBoard(d) {
   if (!d || d._norm) return d;
   d._norm = true;
-  const series = Array.isArray(d.board) ? d.board.map((s) => ({ ...s, status: s.status ?? s.counts })) : arr(d.series);
-  d.series = series;
-  const verdicts = Object.fromEntries(VERDICTS.map((v) => [v, series.reduce((a, s) => a + (s.verdicts?.[v] ?? 0), 0)]));
-  const wl = d.worklist ?? {};
-  const wlN = wl.counts ? Object.values(wl.counts).reduce((a, n) => a + (n ?? 0), 0) : ['interpretation_missing', 'data_newer_than_result', 'idea_without_prereg'].reduce((a, k) => a + arr(wl[k]).length, 0);
-  d.stats = { ...(d.stats ?? {}), verdicts: d.stats?.verdicts ?? verdicts, worklist: d.stats?.worklist ?? wlN };
-  for (const x of arr(wl.data_newer_than_result)) if (Array.isArray(x.detail)) x.detail = flagText({ detail: x.detail });
-  for (const x of arr(wl.prereg_after_result)) if (x.detail && typeof x.detail !== 'string') x.detail = flagText({ detail: x.detail });
-  if (Array.isArray(d.evidence_map)) {
-    d.evidence_map = { rows: d.evidence_map.map((r) => ({ ...r, ...(r.verdicts ?? {}), key: `${r.series ?? ''}|${r.theory}` })) };
-  }
+  d.series = Array.isArray(d.board) ? d.board : arr(d.series);
+  if (Array.isArray(d.evidence_map)) d.evidence_map = { rows: d.evidence_map.map((r) => ({ ...r, ...(r.verdicts ?? {}) })) };
   return d;
 }

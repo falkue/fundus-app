@@ -234,9 +234,33 @@ def _prereg(store: Store, hid: int):
 
 
 def _results(store: Store, hid: int) -> list:
-    # current = the newest full run (a sample/pilot run only counts when there is no full run)
-    return store.db.execute("SELECT * FROM hypothesis_result WHERE hypothesis_id = ? ORDER BY sample_run ASC, at DESC, id DESC",
-                            (hid,)).fetchall()
+    # current = the newest full run (a sample/pilot run only counts when there is no full run); duplicates never count
+    return store.db.execute("SELECT * FROM hypothesis_result WHERE hypothesis_id = ? AND duplicate_of IS NULL "
+                            "ORDER BY sample_run ASC, at DESC, id DESC", (hid,)).fetchall()
+
+
+def _norm_effect(t) -> str:
+    t = str(t or "")
+    for a, b in (("“", '"'), ("”", '"'), ("„", '"'), ("«", '"'), ("»", '"'), ("‘", "'"), ("’", "'"), ("`", "'"),
+                 ("−", "-")):
+        t = t.replace(a, b)
+    return re.sub(r"\s+", " ", t).strip()
+
+
+def _r6(v):
+    return None if v is None else round(float(v), 6)
+
+
+def result_key(hid, verdict, effect, estimate, ci_low, ci_high, n, n_text, sample_run) -> tuple:
+    """Content key of a result: two results with the same key are the same result (whatever their source or time)."""
+    nn = str(int(n)) if n not in (None, "") else re.sub(r"\s+", " ", str(n_text or "")).strip()
+    return (int(hid), norm_verdict(verdict), _norm_effect(effect), _r6(estimate), _r6(ci_low), _r6(ci_high), nn,
+            int(bool(sample_run)))
+
+
+def _row_key(r) -> tuple:
+    return result_key(r["hypothesis_id"], r["verdict"], r["effect"], r["estimate"], r["ci_low"], r["ci_high"], r["n"],
+                      r["n_text"], r["sample_run"])
 
 
 def _current_result(store: Store, hid: int):
@@ -599,6 +623,8 @@ def add_deviation(store: Store, ref, field: str, after, reason: str, timing: str
                      "VALUES (?,?,?,?,?,?,?,?)", (h["id"], at or _now(), field.strip(), _txt(before), _txt(after),
                                                   reason.strip(), timing, _actor(store, actor)))
     store.log("hypothesis", h["id"], "deviation", {"field": field, "timing": timing})
+    if field.strip() == "direction" and after not in (None, ""):   # the list shows hypothesis.direction: follow the plan
+        store.db.execute("UPDATE hypothesis SET direction = ? WHERE id = ?", (_txt(after), h["id"]))
     _index_h(store, h["id"])
     _commit(store)
     return get_hypothesis(store, h["id"])
@@ -683,6 +709,13 @@ def add_result(store: Store, ref, verdict, effect: str | None = None, estimate=N
                               f"(for an exploratory result record a finding instead)")
     if isinstance(n, str) and not n.strip().isdigit():
         n_text, n = n_text or n, None
+    key = result_key(h["id"], v, _txt(effect), _num(estimate), _num(ci_low), _num(ci_high), n, _txt(n_text), sample_run)
+    last = _current_result(store, h["id"])
+    if last is not None and _row_key(last) == key:
+        out = get_hypothesis(store, h["id"])
+        out.update({"unchanged": True, "result": f"result:{last['id']}",
+                    "note": "identisch mit dem aktuellen Ergebnis – nicht doppelt angelegt"})
+        return out
     at = at or _now()
     ins = norm_inputs(store, inputs, at)
     cur = store.db.execute(
@@ -695,7 +728,8 @@ def add_result(store: Store, ref, verdict, effect: str | None = None, estimate=N
          int(bool(sample_run)), _txt(partial_data), int(bool(skipped)), at, _actor(store, actor), source, _now()))
     rid = cur.lastrowid
     if h["status"] != "revised":
-        full = store.db.execute("SELECT 1 FROM hypothesis_result WHERE hypothesis_id = ? AND sample_run = 0 LIMIT 1",
+        full = store.db.execute("SELECT 1 FROM hypothesis_result WHERE hypothesis_id = ? AND sample_run = 0 "
+                                "AND duplicate_of IS NULL LIMIT 1",
                                 (h["id"],)).fetchone()
         # a sample/pilot run alone leaves the hypothesis 'running'; the first full run makes it 'result'
         new = "result" if full else ("running" if h["status"] in ("idea", "preregistered", "running") else h["status"])
@@ -1239,6 +1273,10 @@ def get_hypothesis(store: Store, ref, include_internal: bool = True, project: st
         "prereg": pre, "deviations": devs,
         "current_result": _result_out(store, cur) if cur else None,
         "results": [_result_out(store, r) for r in results],
+        # technical info: results marked as duplicates (never deleted, ignored everywhere else)
+        "duplicates": [dict(r) for r in store.db.execute(
+            "SELECT id, source, at, duplicate_of FROM hypothesis_result WHERE hypothesis_id = ? AND duplicate_of IS NOT NULL "
+            "ORDER BY id", (h["id"],))],
         "interpretation_state": (interpretation_state(dict(_interp(store, "hypothesis_result", cur["id"]) or {})) if cur else None),
         "links": _links(store, "hypothesis", h["id"]), "flags": _flags_h(store, h, ctx, results, p),
         "lineage": _lineage(store, cur), "history": _history(store, "hypothesis", h["id"]),
@@ -1285,7 +1323,7 @@ def _index_h(store: Store, hid: int) -> None:
         parts += [p[k] for k in (*PREREG_FIELDS, "text")]
     for d in store.db.execute("SELECT field, after, reason FROM hypothesis_deviation WHERE hypothesis_id = ?", (hid,)):
         parts += list(d)
-    for r in store.db.execute("SELECT * FROM hypothesis_result WHERE hypothesis_id = ?", (hid,)):
+    for r in store.db.execute("SELECT * FROM hypothesis_result WHERE hypothesis_id = ? AND duplicate_of IS NULL", (hid,)):
         parts += [r["verdict"].replace("_", " "), LABELS["verdict"][r["verdict"]], r["effect"], r["robustness"], r["caveats"],
                   r["method_doc"], r["inputs"]]
         i = _interp(store, "hypothesis_result", r["id"])
@@ -1373,7 +1411,7 @@ def search(store: Store, question: str = "", series=None, kind: str | None = Non
             if th and th not in json.dumps(_theory_cards(store, h["series_id"], _l(h["theory_refs"], [])), ensure_ascii=False).lower():
                 continue
             if ds_like and not store.db.execute(
-                    "SELECT 1 FROM hypothesis_result WHERE hypothesis_id = ? AND inputs LIKE ? UNION ALL "
+                    "SELECT 1 FROM hypothesis_result WHERE hypothesis_id = ? AND inputs LIKE ? AND duplicate_of IS NULL UNION ALL "
                     "SELECT 1 FROM hypothesis_prereg WHERE hypothesis_id = ? AND (data LIKE ? OR data LIKE ?) LIMIT 1",
                     (h["id"], ds_like, h["id"], ds_like, ds_like.replace('"', ""))).fetchone():
                 continue
@@ -1430,7 +1468,7 @@ def board(store: Store, include_internal: bool = True, project: str | None = Non
             "verdicts": {k: 0 for k in VERDICTS}, "hypotheses": 0, "findings": 0, "interpretation_missing": 0, "imported_partial": 0}
     cur = {r[0]: r for r in store.db.execute(
         "SELECT r.hypothesis_id, r.verdict, r.id, (SELECT count(*) FROM interpretation i WHERE i.owner_kind = 'hypothesis_result' "
-        "AND i.owner_id = r.id) FROM hypothesis_result r ORDER BY r.hypothesis_id, r.sample_run DESC, r.at, r.id")}
+        "AND i.owner_id = r.id) FROM hypothesis_result r WHERE r.duplicate_of IS NULL ORDER BY r.hypothesis_id, r.sample_run DESC, r.at, r.id")}
     complete = _complete_owners(store)
     for h in store.db.execute("SELECT id, series_id, status, visibility, project, imported_partial FROM hypothesis"):
         if not _visible(h, include_internal, project):
@@ -1538,7 +1576,7 @@ def stats(store: Store, include_internal: bool = True) -> dict:
     q = lambda sql: store.db.execute(sql).fetchone()[0]
     return {"series": q("SELECT count(*) FROM research_series"), "hypotheses": q("SELECT count(*) FROM hypothesis"),
             "preregistered": q("SELECT count(*) FROM hypothesis_prereg WHERE frozen_at IS NOT NULL"),
-            "results": q("SELECT count(*) FROM hypothesis_result"), "findings": q("SELECT count(*) FROM finding"),
+            "results": q("SELECT count(*) FROM hypothesis_result WHERE duplicate_of IS NULL"), "findings": q("SELECT count(*) FROM finding"),
             "deviations": q("SELECT count(*) FROM hypothesis_deviation"),
             "interpretations": q("SELECT count(*) FROM interpretation")}
 
@@ -1564,7 +1602,8 @@ def research_for_dataset(store: Store, did: int, include_internal: bool = True, 
     like = f'%"dataset:{did}"%'
     out = []
     for h in store.db.execute(
-            "SELECT * FROM hypothesis h WHERE EXISTS (SELECT 1 FROM hypothesis_result r WHERE r.hypothesis_id = h.id AND r.inputs LIKE ?) "
+            "SELECT * FROM hypothesis h WHERE EXISTS (SELECT 1 FROM hypothesis_result r WHERE r.hypothesis_id = h.id AND r.inputs LIKE ? "
+            "AND r.duplicate_of IS NULL) "
             "OR EXISTS (SELECT 1 FROM hypothesis_prereg p WHERE p.hypothesis_id = h.id AND p.data LIKE ?) ORDER BY h.id", (like, like)):
         if not _visible(h, include_internal, project):
             continue
@@ -1582,4 +1621,79 @@ def research_for_dataset(store: Store, did: int, include_internal: bool = True, 
             out.append({"type": "finding", "ref": f"finding:{f['id']}", "id": f["id"], "code": f["code"],
                         "title": f["title"] or f["statement"][:140], "status": f["status"], "verdict": None, "exploratory": True})
     out.sort(key=lambda x: (x["type"] != "hypothesis", _code_key(x["code"])))
+    return out
+
+
+# ------------------------------------------------------------------ duplicate results
+def _interp_ids(store: Store, rid: int) -> int | None:
+    r = store.db.execute("SELECT max(id) FROM interpretation WHERE owner_kind = 'hypothesis_result' AND owner_id = ?", (rid,)).fetchone()
+    return r[0] if r else None
+
+
+def dedupe(store: Store, apply: bool = False, actor: str | None = None) -> dict:
+    """Mark identical results (same content key) as duplicates of one keeper – never delete. Keeper: (a) the one with an
+    interpretation (the newest interpretation wins), (b) else the newest 'registered' one, (c) else the oldest imported
+    one. Interpretations on non-keepers stay where they are and are reported. Idempotent; dry run unless apply."""
+    groups = []
+    rows = store.db.execute("SELECT r.*, h.code FROM hypothesis_result r JOIN hypothesis h ON h.id = r.hypothesis_id "
+                            "WHERE r.duplicate_of IS NULL ORDER BY r.hypothesis_id, r.id").fetchall()
+    by: dict[tuple, list] = {}
+    for r in rows:
+        by.setdefault(_row_key(r), []).append(r)
+    marked, on_dup, touched = 0, [], set()
+    for key, rs_ in by.items():
+        if len(rs_) < 2:
+            continue
+        inter = [(r, _interp_ids(store, r["id"])) for r in rs_]
+        with_i = [(r, i) for r, i in inter if i]
+        if with_i:
+            keeper, rule = max(with_i, key=lambda x: x[1])[0], "a: interpretation"
+        elif any(r["source"] == "registered" for r in rs_):
+            keeper = max((r for r in rs_ if r["source"] == "registered"), key=lambda r: (r["at"], r["id"]))
+            rule = "b: registered"
+        else:
+            keeper, rule = min(rs_, key=lambda r: (r["at"], r["id"])), "c: oldest imported"
+        dups = [r for r in rs_ if r["id"] != keeper["id"]]
+        groups.append({"code": rs_[0]["code"], "hypothesis": rs_[0]["hypothesis_id"], "keeper": keeper["id"], "rule": rule,
+                       "keeper_source": keeper["source"], "duplicates": [{"id": r["id"], "source": r["source"], "at": r["at"]}
+                                                                         for r in dups]})
+        for r, i in inter:
+            if i and r["id"] != keeper["id"]:
+                on_dup.append({"code": r["code"], "result": r["id"], "keeper": keeper["id"],
+                               "note": "Interpretation an Duplikat"})
+        if apply:
+            for r in dups:
+                store.db.execute("UPDATE hypothesis_result SET duplicate_of = ? WHERE id = ? AND duplicate_of IS NULL",
+                                 (keeper["id"], r["id"]))
+                store.log("hypothesis", r["hypothesis_id"], "duplicate", {"result": r["id"], "duplicate_of": keeper["id"],
+                                                                         "rule": rule})
+                touched.add(r["hypothesis_id"])
+        marked += len(dups)
+    if apply:
+        for hid in touched:
+            _index_h(store, hid)
+        _commit(store)
+    return {"apply": apply, "groups": len(groups), "duplicates": marked, "interpretation_on_duplicate": on_dup,
+            "details": groups, "check": check_interpretations(store) if apply else None}
+
+
+def check_interpretations(store: Store) -> list[dict]:
+    """Every hypothesis with an interpreted result: the current result must carry the interpretation, or be a later
+    result with different numbers (a real rerun). Returns the cases where that is not so."""
+    out = []
+    for (hid,) in store.db.execute("SELECT DISTINCT r.hypothesis_id FROM interpretation i JOIN hypothesis_result r "
+                                   "ON i.owner_kind = 'hypothesis_result' AND i.owner_id = r.id").fetchall():
+        cur = _current_result(store, hid)
+        interp = store.db.execute("SELECT DISTINCT r.* FROM hypothesis_result r JOIN interpretation i ON i.owner_kind = "
+                                  "'hypothesis_result' AND i.owner_id = r.id WHERE r.hypothesis_id = ?", (hid,)).fetchall()
+        if cur is None:
+            continue
+        if any(r["id"] == cur["id"] for r in interp):
+            continue
+        if all(_row_key(r) != _row_key(cur) and cur["at"] > r["at"] for r in interp):
+            continue                                   # a real rerun after the interpreted result
+        code = store.db.execute("SELECT code FROM hypothesis WHERE id = ?", (hid,)).fetchone()[0]
+        out.append({"code": code, "current": cur["id"], "current_at": cur["at"],
+                    "interpreted": [{"id": r["id"], "at": r["at"], "duplicate_of": r["duplicate_of"],
+                                     "sample_run": bool(r["sample_run"])} for r in interp]})
     return out

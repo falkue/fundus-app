@@ -610,6 +610,13 @@ def cmd_research(st: Store, a) -> int:
     if c == "reindex":
         _print({"indexed": rs.reindex(st)})
         return 0
+    if c == "dedupe":
+        res = rs.dedupe(st, apply=a.apply, actor="cli")
+        if not a.verbose:
+            res["details"] = [f"{g['code']}: keeper result:{g['keeper']} ({g['rule']}), duplicates "
+                              f"{', '.join(str(d['id']) for d in g['duplicates'])}" for g in res["details"]]
+        _print(res)
+        return 0
     if c == "worklist":
         w = rs.worklist(st, limit=a.limit)
         if a.json:
@@ -945,7 +952,8 @@ def main(argv=None) -> int:
 
     p = sub.add_parser("research", help="research registry: hypotheses (pre-registered) and findings – list, show, search, "
                                         "worklist, series, import, reindex (fundus.research)")
-    p.add_argument("research_cmd", choices=("list", "show", "search", "worklist", "series", "import", "reindex"))
+    p.add_argument("research_cmd", choices=("list", "show", "search", "worklist", "series", "import", "reindex", "dedupe"))
+    p.add_argument("--apply", action="store_true", help="dedupe: mark the duplicates (default: dry run, report only)")
     p.add_argument("args", nargs="*", help="show: ref · search: words · series: slug · import: folder (_analysen)")
     p.add_argument("--dry-run", action="store_true", help="import: count only, write nothing")
     p.add_argument("--series")

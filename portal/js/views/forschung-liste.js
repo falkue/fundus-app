@@ -1,197 +1,201 @@
 /**
- * Forschung › Hypothesen (#forschung?tab=hypothesen&series=…&verdict=…&status=…&kind=…&theory=…&ip=missing&q=…&sort=…)
- * and Findings (#forschung?tab=findings&…): filter in the browser over the whole list (GET /api/research/hypotheses,
- * /api/research/findings); from 3 characters the server search adds matches in pre-registrations, results and
- * interpretations. Every verdict is a filter of equal rank; no default sort puts "gestützt" first.
+ * Forschung – the main page: one list of hypotheses and findings (#forschung?q=…&art=h|f&series=…&result=…&ip=missing
+ * &status=…&theory=…&dataset=…&flag=…). A one-line summary, a search field, three dropdowns (Art, Serie, Ergebnis) and
+ * "Weitere Filter" for the rest. Rows: code · title with a muted second line · type · result · interpretation · date;
+ * the whole row is a link. Filtering runs in the browser; from 3 characters the server search adds matches in plans,
+ * results and interpretations, and the dataset filter asks the server.
+ * Data: GET /api/research/hypotheses?limit=2000, /api/research/findings?limit=2000, /api/research/series.
  */
-import { el, emptyNote, segmented } from '../lib/dom.js';
+import { el } from '../lib/dom.js';
 import * as fmt from '../lib/fmt.js';
-import { arr, kids, hp, api, put, listItems, VERDICTS, VERDICT, STATUS, KIND, STRENGTH, STRENGTH_LABEL, FSTATUS, FLAG, vpill, vmark, statusChip, kindChip,
-  interpChip, exploratoryChip, hypHref, findHref, seriesLabel, day, hay, verdictBar } from './forschung-lib.js';
-import { ciGlyph } from './forschung-svg.js';
-import { strengthScale } from './forschung-finding.js';
+import { arr, kids, hp, api, put, listItems, VERDICTS, VERDICT, STATUS, KIND, interpWord, resultPill, itemHref, isFinding, seriesLabel, day, hay } from './forschung-lib.js';
+import { rememberList } from './forschung-finding.js';
 
-const PAGE = 80;
+const PAGE = 100;
+const NOTES = [['data_newer_than_result', 'Neuere Daten verfügbar'], ['prereg_incomplete', 'Plan unvollständig'], ['prereg_missing', 'Ohne Plan abgelegt'],
+  ['sample_only', 'Bisher nur ein Probelauf']];
 const codeKey = (c) => String(c ?? '').replace(/\d+/g, (d) => d.padStart(5, '0'));
-const H_SORTS = [{ value: 'code', label: 'Code' }, { value: 'result', label: 'Neueste Ergebnisse zuerst' }, { value: 'created', label: 'Zuletzt erfasst' },
-  { value: 'verdict', label: 'Nach Urteil gruppiert' }, { value: 'n', label: 'Grösste Fallzahl' }];
-const F_SORTS = [{ value: 'updated', label: 'Zuletzt geändert' }, { value: 'code', label: 'Code' }, { value: 'strength', label: 'Nach Stärke' }, { value: 'evidence', label: 'Meiste Belege' }];
+const KEYS = ['q', 'art', 'series', 'result', 'ip', 'status', 'theory', 'dataset', 'flag'];
 
-async function loadAll(kind) {
-  const d = await api(`/${kind}?limit=2000`);
-  return listItems(d, kind);
-}
-
-export function render(root, ctx, kind, alive, board) {
-  const isH = kind === 'hypotheses';
+export function render(root, ctx, alive) {
   const p = hp();
-  const st = { q: p.get('q') ?? '', series: p.get('series') ?? '', verdict: p.get('verdict') ?? '', status: p.get('status') ?? '', kindF: p.get('kind') ?? '',
-    theory: p.get('theory') ?? '', ip: p.get('ip') ?? '', flag: p.get('flag') ?? '', strength: p.get('strength') ?? '', sort: p.get('sort') ?? (isH ? 'code' : 'updated'),
-    limit: PAGE, items: null, server: null, serverQ: '' };
-  const q = el('input.input.dk-q', { type: 'search', value: st.q, placeholder: isH ? 'Suchen – Code, Titel, Theorie, Datensatz, Text der Präregistrierung …' : 'Suchen – Titel, Aussage, Kontext, Zitat …', 'aria-label': 'Suchen' });
-  const controls = {};
-  const sel = (key, label, opts) => {
-    const s = el('select.input.fo-sel', { 'aria-label': label }, el('option', { value: '' }, label), opts.map(([v, l]) => el('option', { value: v }, l)));
+  const st = Object.fromEntries(KEYS.map((k) => [k, p.get(k) ?? '']));
+  st.limit = PAGE;
+  const names = new Map();
+  const sName = (slug) => names.get(slug) ?? seriesLabel(slug);
+  let items = null, seriesList = [], server = null, serverQ = '', dsIds = null, dsRef = '', theories = null;
+
+  const summary = el('p.fo-summary', { 'aria-live': 'polite' });
+  const q = el('input.input.fo-q', { type: 'search', value: st.q, placeholder: 'Suchen nach Titel, Code oder Text', 'aria-label': 'Hypothesen und Findings durchsuchen' });
+  const select = (key, label, opts) => {
+    const s = el('select.input.fo-select', { 'aria-label': label }, opts.map(([v, l]) => el('option', { value: v }, l)));
     s.value = st[key];
-    s.addEventListener('change', () => { st[key] = s.value; st.limit = PAGE; draw(); });
-    controls[key] = s;
+    s.addEventListener('change', () => { st[key] = s.value; st.limit = PAGE; if (key === 'dataset') loadDataset(); draw(); });
     return s;
   };
-  const seriesOpts = arr(board?.series).filter((s) => s.slug).map((s) => [s.slug, `${seriesLabel(s.slug)} – ${s.title}`]).concat([['none', 'ohne Serie']]);
-  // theory filter value = '<series slug>|<theory id>' (theory ids are per series, e.g. 'A' or 'T1')
-  const tkey = (r) => r.key ?? `${r.series ?? ''}|${r.theory}`;
-  const theoryOpts = arr(board?.evidence_map?.rows).map((r) => [tkey(r), r.series ? `${seriesLabel(r.series)}: ${r.name ?? r.theory}` : (r.name ?? r.theory)]);
-  const sort = el('select.input.dk-sort', { 'aria-label': 'Sortierung' }, (isH ? H_SORTS : F_SORTS).map((s) => el('option', { value: s.value }, s.label)));
-  sort.value = st.sort;
-  sort.addEventListener('change', () => { st.sort = sort.value; draw(); });
-  const verdictSeg = isH ? segmented([{ value: '', label: 'alle Urteile' }, ...VERDICTS.map((v) => ({ value: v, label: VERDICT[v] })), { value: 'none', label: 'ohne Ergebnis' }],
-    st.verdict, (v) => { st.verdict = v; st.limit = PAGE; draw(); }, 'Urteil') : null;
-  if (verdictSeg) {
-    verdictSeg.el.classList.add('fo-vseg');
-    verdictSeg.el.querySelectorAll('.seg__btn').forEach((b, i) => { const v = [null, ...VERDICTS, 'open'][i]; if (v) b.prepend(vmark(v)); });
-  }
-  const filters = isH
-    ? [sel('series', 'alle Serien', seriesOpts), sel('status', 'jeder Status', Object.entries(STATUS)), sel('kindF', 'jede Art', Object.entries(KIND)),
-      theoryOpts.length ? sel('theory', 'jede Theorie', theoryOpts) : null,
-      sel('ip', 'Interpretation: alle', [['missing', 'Interpretation fehlt oder unvollständig'], ['complete', 'Interpretation vollständig']]),
-      sel('flag', 'alle Hinweise', [['data_newer_than_result', FLAG.data_newer_than_result], ['interpretation_missing', FLAG.interpretation_missing]])]
-    : [sel('series', 'alle Serien', seriesOpts), sel('kindF', 'jede Art', Object.entries(KIND)), sel('strength', 'jede Stärke', STRENGTH.map((s) => [s, STRENGTH_LABEL[s]])),
-      sel('status', 'jeder Status', Object.entries(FSTATUS)), sel('ip', 'Interpretation: alle', [['missing', 'Interpretation fehlt oder unvollständig'], ['complete', 'Interpretation vollständig']])];
-  const info = el('div.dk-info', { 'aria-live': 'polite' });
+  const art = select('art', 'Art', [['', 'Hypothesen und Findings'], ['h', 'Nur Hypothesen'], ['f', 'Nur Findings']]);
+  const seriesSel = select('series', 'Serie', [['', 'Alle Serien']]);
+  const result = select('result', 'Ergebnis', [['', 'Jedes Ergebnis'], ...VERDICTS.map((v) => [v, VERDICT[v]]), ['none', 'noch kein Ergebnis']]);
+  const status = select('status', 'Status', [['', 'Jeder Status'], ...Object.entries(STATUS).map(([v, l]) => [v, `Status: ${l}`])]);
+  const flag = select('flag', 'Hinweise', [['', 'Alle Hinweise'], ...NOTES]);
+  const ipSel = select('ip', 'Interpretation', [['', 'Interpretation: alle'], ['missing', 'ohne Interpretation'], ['complete', 'mit Interpretation']]);
+  const theory = select('theory', 'Theorie', [['', 'Jede Theorie']]);
+  const dataset = el('input.input.fo-select', { type: 'text', value: st.dataset, placeholder: 'Datensatz, z. B. dataset:47', 'aria-label': 'Datensatz' });
+  dataset.addEventListener('change', () => { st.dataset = dataset.value.trim(); st.limit = PAGE; loadDataset(); });
+  const more = el('details.fo-morefilters', { open: !!(st.status || st.theory || st.dataset || st.flag || st.ip) },
+    el('summary', 'Weitere Filter'), el('div.fo-filters', status, theory, flag, ipSel, dataset));
+  more.addEventListener('toggle', () => { if (more.open) loadTheories(); });
   const results = el('div.fo-results');
-  const summary = el('div.fo-listsum');
-  put(root, el('div.fo-toolbar', q, sort), verdictSeg?.el, el('div.fo-filters', filters.filter(Boolean)), summary, info, results);
+  const foot = el('p.fo-foot', el('a', { href: '#forschung?view=uebersicht' }, 'Übersicht nach Theorie und Serie'));
+  root.append(el('h1.fo-title', 'Forschung'), summary, el('div.fo-toolbar', q, art, seriesSel, result), more, results, foot);
 
   let tmr, stmr;
   q.addEventListener('input', () => { clearTimeout(tmr); tmr = setTimeout(() => { st.q = q.value.trim(); st.limit = PAGE; draw(); serverSearch(); }, 160); });
 
+  async function load() {
+    put(results, el('p.fo-muted', 'Lade …'));
+    try {
+      const [h, f, s] = await Promise.all([api('/hypotheses?limit=2000'), api('/findings?limit=2000'), api('/series').catch(() => ({}))]);
+      if (!alive()) return;
+      seriesList = arr(s.series);
+      // newest series first: numbered series by number (serie-13 before serie-2), the others after them
+      const order = new Map(seriesList.map((x) => [x.slug, Number((x.slug ?? '').match(/^serie-(\d+)/)?.[1] ?? 0)]));
+      for (const x of seriesList) if (!/^serie-\d/.test(x.slug ?? '')) names.set(x.slug, shorten(x.title ?? x.slug, 32));
+      items = [...listItems(h, 'hypotheses').map((x) => ({ ...x, type: 'hypothesis' })), ...listItems(f, 'findings').map((x) => ({ ...x, type: 'finding' }))];
+      for (const x of items) {
+        x._s = x.series?.slug ?? x.series ?? '';
+        x._hay = hay(x.code, x.title, x.statement, x._s, sName(x._s), x.project, KIND[x.kind], VERDICT[x.verdict]);
+        x._ord = [order.has(x._s) ? order.get(x._s) : -1, isFinding(x) ? 1 : 0, codeKey(x.code)];
+        x._ip = isFinding(x) || x.verdict ? interpWord(x.interpretation_state) : null;
+      }
+      items.sort((a, b) => b._ord[0] - a._ord[0] || a._ord[1] - b._ord[1] || a._ord[2].localeCompare(b._ord[2]));
+      const used = new Set(items.map((x) => x._s));
+      put(seriesSel, el('option', { value: '' }, 'Alle Serien'),
+        seriesList.filter((x) => used.has(x.slug)).map((x) => el('option', { value: x.slug }, /^serie-\d/.test(x.slug) ? `${seriesLabel(x.slug)} – ${shorten(x.title, 60)}` : shorten(x.title ?? x.slug, 70))),
+        used.has('') ? el('option', { value: 'none' }, 'ohne Serie') : null);
+      seriesSel.value = st.series;
+      if (more.open) loadTheories();
+      if (st.dataset) await loadDataset();
+      draw();
+      if (st.q) serverSearch();
+    } catch (e) { put(results, el('p', `Liste nicht ladbar: ${e.message}`)); }
+  }
+
+  async function loadTheories() {
+    if (theories) return;
+    theories = [];
+    try {
+      const b = await api('');
+      theories = arr(b.evidence_map).map((r) => ({ key: `${r.series ?? ''}|${r.theory}`, label: `${r.series ? `${seriesLabel(r.series)}: ` : ''}${shorten(r.name ?? r.theory, 70)}` }));
+      if (!alive()) return;
+      put(theory, el('option', { value: '' }, 'Jede Theorie'), theories.map((t) => el('option', { value: t.key }, t.label)));
+      theory.value = st.theory;
+    } catch { /* no theory filter */ }
+  }
+
+  async function loadDataset() {
+    const ref = st.dataset;
+    if (!ref) { dsIds = null; dsRef = ''; draw(); return; }
+    try {
+      const r = (x) => api(`/${x}?dataset=${encodeURIComponent(/^\d+$/.test(ref) ? `dataset:${ref}` : ref)}&limit=2000`);
+      const [h, f] = await Promise.all([r('hypotheses'), r('findings')]);
+      dsIds = new Set([...listItems(h, 'hypotheses').map((x) => `h${x.id}`), ...listItems(f, 'findings').map((x) => `f${x.id}`)]);
+      dsRef = ref;
+      draw();
+    } catch (e) { ctx.toast(`Datensatz-Filter: ${e.message}`, 5000); }
+  }
+
   function serverSearch() {
     clearTimeout(stmr);
     const text = st.q;
-    if (text.length < 3) { st.server = null; st.serverQ = ''; return; }
+    if (text.length < 3) { server = null; serverQ = ''; return; }
     stmr = setTimeout(async () => {
       try {
-        const r = await api(`/${kind}?q=${encodeURIComponent(text)}&limit=300`);
+        const [h, f] = await Promise.all([api(`/hypotheses?q=${encodeURIComponent(text)}&limit=500`), api(`/findings?q=${encodeURIComponent(text)}&limit=500`)]);
         if (!alive() || text !== st.q) return;
-        st.server = new Set(listItems(r, kind).map((x) => x.id));
-        st.serverQ = text;
+        server = new Set([...listItems(h, 'hypotheses').map((x) => `h${x.id}`), ...listItems(f, 'findings').map((x) => `f${x.id}`)]);
+        serverQ = text;
         draw();
       } catch { /* browser search only */ }
     }, 380);
   }
 
-  async function load() {
-    put(results, el('div.dk-skel', Array.from({ length: 4 }, () => el('div.dk-skel__card'))));
-    try {
-      st.items = await loadAll(kind);
-      if (!alive()) return;
-      for (const x of st.items) x._hay = hay(x.code, x.title, x.statement, x.effect, x.series, x.project, arr(x.theory_refs), x.kind, KIND[x.kind], STATUS[x.status], VERDICT[x.verdict], x.context ? Object.values(x.context) : null, x.method);
-      draw();
-      if (st.q) serverSearch();
-    } catch (e) { put(results, el('div.alert.alert--error', `Liste nicht ladbar: ${e.message}`)); }
-  }
-
-  function writeHash() {
-    const h = new URLSearchParams({ tab: isH ? 'hypothesen' : 'findings' });
-    for (const k of ['q', 'series', 'verdict', 'status', 'theory', 'ip', 'flag', 'strength']) if (st[k]) h.set(k, st[k]);
-    if (st.kindF) h.set('kind', st.kindF);
-    if (st.sort !== (isH ? 'code' : 'updated')) h.set('sort', st.sort);
-    const s = `#forschung?${h}`;
-    if (location.hash !== s) history.replaceState(null, '', s);
-  }
-
-  function passes(x, except) {
+  const key = (x) => `${isFinding(x) ? 'f' : 'h'}${x.id}`;
+  function passes(x) {
     const tokens = st.q.toLowerCase().split(/\s+/).filter(Boolean);
-    const srv = st.server && st.serverQ === st.q && st.server.has(x.id);
-    if (tokens.length && !srv && !tokens.every((t) => x._hay.includes(t))) return false;
-    if (st.series && (st.series === 'none' ? x.series : (x.series?.slug ?? x.series) !== st.series)) return false;
-    if (except !== 'verdict' && st.verdict && (st.verdict === 'none' ? !!x.verdict : x.verdict !== st.verdict)) return false;
-    if (st.status && x.status !== st.status) return false;
-    if (st.kindF && x.kind !== st.kindF) return false;
-    if (st.theory) {
-      const [ts, tid] = st.theory.includes('|') ? st.theory.split('|') : ['', st.theory];
-      if (!arr(x.theory_refs).includes(tid) || (ts && (x.series?.slug ?? x.series) !== ts)) return false;
-    }
-    if (st.strength && x.strength !== st.strength) return false;
-    const ipState = x.interpretation_state ?? (x.interpretation_complete ? 'complete' : 'missing');
-    if (st.ip === 'missing' && (ipState === 'complete' || (isH && !x.verdict))) return false;
-    if (st.ip === 'complete' && ipState !== 'complete') return false;
+    if (tokens.length && !(server && serverQ === st.q && server.has(key(x))) && !tokens.every((t) => x._hay.includes(t))) return false;
+    if (st.art === 'h' && isFinding(x)) return false;
+    if (st.art === 'f' && !isFinding(x)) return false;
+    if (st.series && (st.series === 'none' ? x._s : x._s !== st.series)) return false;
+    if (st.result && (isFinding(x) || (st.result === 'none' ? !!x.verdict : x.verdict !== st.result))) return false;
+    if (st.ip === 'missing' && (x._ip === null || x._ip === 'vorhanden')) return false;
+    if (st.ip === 'complete' && x._ip !== 'vorhanden') return false;
+    if (st.status && (isFinding(x) || x.status !== st.status)) return false;
     if (st.flag && !arr(x.flags).includes(st.flag)) return false;
+    if (st.theory) {
+      const [ts, tid] = st.theory.split('|');
+      if (!arr(x.theory_refs).includes(tid) || (ts && x._s !== ts)) return false;
+    }
+    if (st.dataset && dsIds && dsRef === st.dataset && !dsIds.has(key(x))) return false;
     return true;
   }
 
-  function sorter() {
-    const vi = (x) => (x.verdict ? VERDICTS.indexOf(x.verdict) : 9);
-    return {
-      code: (a, b) => codeKey(a.code).localeCompare(codeKey(b.code)),
-      result: (a, b) => String(b.result_at ?? (b.verdict ? b.updated_at : '') ?? '').localeCompare(String(a.result_at ?? (a.verdict ? a.updated_at : '') ?? '')) || codeKey(a.code).localeCompare(codeKey(b.code)),
-      created: (a, b) => String(b.created_at ?? '').localeCompare(String(a.created_at ?? '')),
-      verdict: (a, b) => vi(a) - vi(b) || codeKey(a.code).localeCompare(codeKey(b.code)),
-      n: (a, b) => (b.n ?? -1) - (a.n ?? -1),
-      updated: (a, b) => String(b.updated_at ?? b.created_at ?? '').localeCompare(String(a.updated_at ?? a.created_at ?? '')),
-      strength: (a, b) => STRENGTH.indexOf(b.strength) - STRENGTH.indexOf(a.strength),
-      evidence: (a, b) => (b.evidence_n ?? 0) - (a.evidence_n ?? 0),
-    }[st.sort] ?? (() => 0);
+  function writeHash() {
+    const h = new URLSearchParams();
+    for (const k of KEYS) if (st[k]) h.set(k, st[k]);
+    const s = `#forschung${h.toString() ? `?${h}` : ''}`;
+    if (location.hash !== s && !(location.hash === '' && s === '#forschung')) history.replaceState(null, '', s);
+    rememberList(s);
+  }
+
+  function drawSummary() {
+    const hs = items.filter((x) => !isFinding(x));
+    const fs = items.length - hs.length;
+    const missing = items.filter((x) => x._ip && x._ip !== 'vorhanden').length;
+    const link = st.ip === 'missing'
+      ? el('a', { href: '#', on: { click: (e) => { e.preventDefault(); st.ip = ''; ipSel.value = ''; draw(); } } }, 'alle zeigen')
+      : el('a', { href: '#', on: { click: (e) => { e.preventDefault(); st.ip = 'missing'; ipSel.value = 'missing'; draw(); } } }, `${fmt.int(missing)} ohne Interpretation`);
+    put(summary, `${fmt.int(hs.length)} Hypothesen · ${fmt.int(hs.filter((x) => x.verdict).length)} mit Ergebnis · ${fmt.int(fs)} Findings`, el('span.fo-summary__sep', ' · '), link);
   }
 
   function draw() {
-    if (!st.items) return;
+    if (!items) return;
     writeHash();
-    const shown = st.items.filter((x) => passes(x)).sort(sorter());
-    if (isH) {
-      const base = st.items.filter((x) => passes(x, 'verdict'));
-      const counts = Object.fromEntries(VERDICTS.map((v) => [v, base.filter((x) => x.verdict === v).length]));
-      put(summary, el('div.fo-listsum__bar', verdictBar(counts, { href: (v) => { const h = new URLSearchParams(location.hash.split('?')[1]); h.set('verdict', v); return `#forschung?${h}`; } })),
-        el('span.small.muted', `${fmt.int(base.filter((x) => !x.verdict).length)} ohne Ergebnis`));
-    }
-    const total = st.items.length;
-    const chips = [];
-    const chip = (label, key) => chips.push(el('button.dk-chip', { type: 'button', title: 'Filter entfernen', on: { click: () => { st[key] = ''; if (controls[key]) controls[key].value = ''; draw(); } } },
-      label, el('span.dk-chip__x', { 'aria-hidden': 'true' }, '×')));
-    if (st.theory) chip(`Theorie: ${arr(board?.evidence_map?.rows).find((r) => tkey(r) === st.theory)?.name ?? st.theory}`, 'theory');
-    if (st.flag) chip(FLAG[st.flag] ?? st.flag, 'flag');
-    put(info, el('span.dk-count', shown.length === total ? `${fmt.int(total)} ${isH ? (total === 1 ? 'Hypothese' : 'Hypothesen') : (total === 1 ? 'Finding' : 'Findings')}`
-      : `${fmt.int(shown.length)} von ${fmt.int(total)}`), st.server && st.serverQ === st.q ? el('span.small.muted', ' · auch im Text von Präregistrierung, Ergebnis und Interpretation gesucht') : null, ...chips);
-    if (!shown.length) { put(results, emptyNote(total ? 'Nichts passt zu Suche und Filtern.' : isH ? 'Noch keine Hypothesen.' : 'Noch keine Findings.')); return; }
+    drawSummary();
+    const shown = items.filter(passes);
     const list = shown.slice(0, st.limit);
-    const more = shown.length > list.length ? el('div.row.dk-more', el('button.btn', { type: 'button', on: { click: () => { st.limit += PAGE; draw(); } } }, `Weitere ${Math.min(PAGE, shown.length - list.length)} anzeigen`),
-      el('button.btn.btn--ghost', { type: 'button', on: { click: () => { st.limit = Infinity; draw(); } } }, `Alle ${fmt.int(shown.length)} anzeigen`)) : null;
-    put(results, isH ? hypTable(list) : el('div.fo-fcards', list.map(findingCard)), more);
+    const active = KEYS.some((k) => st[k]);
+    const reset = active ? el('button.btn.btn--ghost.btn--small', { type: 'button', on: { click: resetAll } }, 'Filter zurücksetzen') : null;
+    if (!shown.length) { put(results, el('div.fo-empty', el('p', 'Nichts gefunden.'), reset)); return; }
+    put(results,
+      active ? el('p.fo-count', `${fmt.int(shown.length)} von ${fmt.int(items.length)}`, ' ', reset) : null,
+      el('div.fo-table', { role: 'table', 'aria-label': 'Hypothesen und Findings' },
+        el('div.fo-row.fo-row--head', { role: 'row' }, ['Code', 'Titel', 'Art', 'Ergebnis', 'Interpretation', 'Datum'].map((t) => el('span', { role: 'columnheader' }, t))),
+        list.map(row)),
+      shown.length > list.length ? el('div.fo-more', el('button.btn', { type: 'button', on: { click: () => { st.limit += PAGE; draw(); } } },
+        `Weitere ${fmt.int(Math.min(PAGE, shown.length - list.length))} anzeigen`), el('span.fo-muted', `(noch ${fmt.int(shown.length - list.length)})`)) : null);
   }
 
-  function hypTable(list) {
-    // effect and n columns only when the list carries numbers (imported briefs have neither)
-    const hasCI = list.some((x) => Number.isFinite(x.estimate));
-    const hasN = list.some((x) => x.n != null);
-    return el('div.card.dk-tablecard', el('div.table-wrap', el('table.table.table--compact.fo-htable',
-      el('thead', el('tr', el('th', { scope: 'col' }, 'Code'), el('th', { scope: 'col' }, 'Hypothese'), el('th', { scope: 'col' }, 'Status'), el('th', { scope: 'col' }, 'Urteil'),
-        hasCI ? el('th.fo-col-ci', { scope: 'col', title: 'Schätzer mit 95-%-Konfidenzintervall, Null in der Mitte' }, 'Effekt') : null, hasN ? el('th.num.fo-col-n', { scope: 'col' }, 'Fallzahl') : null, el('th', { scope: 'col' }, 'Interpretation'))),
-      el('tbody', list.map((x) => {
-        const tr = el('tr.clickable', { tabindex: '0' },
-          el('td.fo-col-code', el('a', { href: hypHref(x) }, x.code ?? `#${x.id}`)),
-          el('td.fo-col-title', el('a', { href: hypHref(x) }, x.title), el('div.small.muted', kids(seriesLabel(x.series), KIND[x.kind], (x.frozen_at ?? x.preregistered_at) ? `präregistriert ${day(x.frozen_at ?? x.preregistered_at)}` : x.verdict ? 'ohne Präregistrierung' : null).join(' · '))),
-          el('td.fo-col-st', statusChip(x.status)),
-          el('td.fo-col-v', vpill(x.verdict, { none: '–' })),
-          hasCI ? el('td.fo-col-ci', ciGlyph(x) ?? el('span.muted', '–')) : null,
-          hasN ? el('td.num.fo-col-n', x.n != null ? fmt.int(x.n) : '–') : null,
-          el('td.fo-col-ip', x.verdict ? interpChip(x.interpretation_state ?? (x.interpretation_complete ? 'complete' : 'missing'), true) : null,
-            arr(x.flags).includes('data_newer_than_result') ? el('div', el('span.fo-flagchip', { title: FLAG.data_newer_than_result }, 'Daten neuer')) : null));
-        const go = (e) => { if (e.target.closest('a')) return; location.hash = hypHref(x); };
-        tr.addEventListener('click', go);
-        tr.addEventListener('keydown', (e) => { if (e.key === 'Enter') go(e); });
-        return tr;
-      })))));
+  function resetAll() {
+    for (const k of KEYS) st[k] = '';
+    q.value = ''; dataset.value = ''; dsIds = null;
+    for (const s of [art, seriesSel, result, status, flag, ipSel, theory]) s.value = '';
+    draw();
   }
 
-  function findingCard(x) {
-    return el('a.card.fo-fcard', { href: findHref(x) },
-      el('div.fo-fcard__top', el('span.fo-fcard__code', x.code ?? `F${x.id}`), exploratoryChip(), kindChip(x.kind), x.status === 'draft' ? el('span.fo-status', FSTATUS.draft) : null),
-      el('h3.fo-fcard__title', x.title),
-      strengthScale(x.strength),
-      el('p.small.muted.fo-fcard__meta', kids(seriesLabel(x.series), x.project, x.evidence_n != null ? `${x.evidence_n} ${x.evidence_n === 1 ? 'Beleg' : 'Belege'}${x.quotes_n ? `, davon ${x.quotes_n} ${x.quotes_n === 1 ? 'Zitat' : 'Zitate'}` : ''}` : null, day(x.updated_at ?? x.created_at)).join(' · ')),
-      el('div.fo-fcard__foot', interpChip(x.interpretation_state ?? (x.interpretation_complete ? 'complete' : 'missing')),
-        arr(x.derived_hypotheses).length ? el('span.small', `→ ${arr(x.derived_hypotheses).join(', ')}`) : null));
+  function row(x) {
+    const f = isFinding(x);
+    const date = f ? x.updated_at : (x.preregistered_at ?? x.updated_at);
+    return el('a.fo-row', { href: itemHref(x), role: 'row' },
+      el('span.fo-row__code', { role: 'cell' }, x.code ?? '–'),
+      el('span.fo-row__title', { role: 'cell' }, el('span.fo-row__t', x.title || x.statement || x.code), el('span.fo-row__sub', kids(x._s ? sName(x._s) : 'ohne Serie', KIND[x.kind]).join(' · '))),
+      el('span.fo-row__type', { role: 'cell' }, f ? 'Finding' : 'Hypothese'),
+      el('span.fo-row__res', { role: 'cell' }, f ? el('span.fo-muted.fo-dash', '–') : resultPill(x.verdict)),
+      el('span.fo-row__ip', { role: 'cell', class: `fo-row__ip${x._ip === 'fehlt' ? ' is-missing' : ''}` }, x._ip ? [el('span.fo-mlabel', 'Interpretation '), x._ip] : el('span.fo-muted', '–')),
+      el('span.fo-row__date', { role: 'cell' }, date ? day(date) : '–'));
   }
 
   load();
 }
+
+const shorten = (s, n) => (String(s ?? '').length > n ? `${String(s).slice(0, n - 1)}…` : String(s ?? ''));
